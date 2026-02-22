@@ -63,7 +63,7 @@ export default function LandingPage({ onEnter }) {
         {/* Branding header */}
         <div style={{ marginBottom: '8px' }}>
           <div style={{ fontSize: '13px', color: BRAND.coolGrey, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '8px' }}>
-            Currie & Brown
+            BUDGET MANAGEMENT
           </div>
           <div style={{ fontSize: '28px', color: BRAND.purple, lineHeight: 1.2, marginBottom: '4px' }}>
             Budget Management

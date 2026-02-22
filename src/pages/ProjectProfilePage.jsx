@@ -121,6 +121,7 @@ export default function ProjectProfilePage({ projectId, onBack }) {
   const [meetings, setMeetings] = useState([])
   const [variations, setVariations] = useState([])
   const [documents, setDocuments] = useState([])
+  const [projectActions, setProjectActions] = useState([])
   const [healthScore, setHealthScore] = useState(null)
 
   useEffect(() => { loadAll() }, [projectId])
@@ -172,7 +173,7 @@ export default function ProjectProfilePage({ projectId, onBack }) {
     }
 
     // Load migration 005-008 data in parallel
-    const [contactsRes, risksRes, lessonsRes, savingsRes, meetingsRes, variationsRes, documentsRes, healthRes] = await Promise.all([
+    const [contactsRes, risksRes, lessonsRes, savingsRes, meetingsRes, variationsRes, documentsRes, actionsRes, healthRes] = await Promise.all([
       supabase.from('project_contacts').select('*').eq('project_id', projectId).order('is_primary', { ascending: false }),
       supabase.from('project_risks').select('*').eq('project_id', projectId).order('identified_date', { ascending: false }),
       supabase.from('project_lessons').select('*').eq('project_id', projectId).order('lesson_date', { ascending: false }),
@@ -180,6 +181,7 @@ export default function ProjectProfilePage({ projectId, onBack }) {
       supabase.from('meetings').select('*').eq('project_id', projectId).order('meeting_date', { ascending: false }),
       supabase.from('project_variations').select('*').eq('project_id', projectId).order('variation_ref', { ascending: true }),
       supabase.from('project_documents').select('*').eq('project_id', projectId).order('document_ref', { ascending: true }),
+      supabase.from('project_actions').select('*').eq('project_id', projectId).order('action_ref', { ascending: true }),
       supabase.from('v_project_health').select('*').eq('project_id', projectId).maybeSingle(),
     ])
 
@@ -190,6 +192,7 @@ export default function ProjectProfilePage({ projectId, onBack }) {
     setMeetings(meetingsRes.data || [])
     setVariations(variationsRes.data || [])
     setDocuments(documentsRes.data || [])
+    setProjectActions(actionsRes.data || [])
     setHealthScore(healthRes.data)
 
     setLoading(false)
@@ -251,8 +254,11 @@ export default function ProjectProfilePage({ projectId, onBack }) {
     background: editing ? BRAND.white : BRAND.greyLight, boxSizing: 'border-box',
   }
 
+  const openActions = projectActions.filter(a => a.status !== 'closed' && a.status !== 'superseded').length
+
   const tabs = [
     { key: 'overview', label: 'Overview' },
+    { key: 'actions', label: 'Actions', count: openActions },
     { key: 'contacts', label: 'Key Contacts', count: contacts.length },
     { key: 'meetings', label: 'Meeting Minutes', count: meetings.length },
     { key: 'risks', label: 'Risk Register', count: openRisks },
@@ -332,6 +338,7 @@ export default function ProjectProfilePage({ projectId, onBack }) {
           openRisks={openRisks}
         />
       )}
+      {activeTab === 'actions' && <ActionsTab actions={projectActions} projectId={projectId} onReload={loadAll} />}
       {activeTab === 'contacts' && <ContactsTab contacts={contacts} />}
       {activeTab === 'meetings' && <MeetingsTab meetings={meetings} />}
       {activeTab === 'risks' && <RisksTab risks={risks} />}
@@ -725,5 +732,221 @@ function DocumentsTab({ documents }) {
         emptyMessage="No documents recorded for this project."
       />
     </div>
+  )
+}
+
+// ============================================================================
+// ACTIONS TAB (Migration 009 — standalone project actions)
+// ============================================================================
+const actionStatusMap = {
+  open: { bg: '#FFF4E5', text: BRAND.amber, label: 'Open' },
+  in_progress: { bg: '#E8F4FD', text: BRAND.blue, label: 'In Progress' },
+  closed: { bg: '#E8F5E8', text: BRAND.green, label: 'Closed' },
+  superseded: { bg: BRAND.greyLight, text: BRAND.coolGrey, label: 'Superseded' },
+}
+
+const actionPriorityMap = {
+  critical: { bg: '#FDECEC', text: BRAND.red, label: 'Critical' },
+  high: { bg: '#FFF4E5', text: BRAND.amber, label: 'High' },
+  normal: { bg: BRAND.greyLight, text: BRAND.coolGrey, label: 'Normal' },
+  low: { bg: '#E8F5E8', text: BRAND.green, label: 'Low' },
+}
+
+const sourceLabels = {
+  manual: 'Manual', phone_call: 'Phone Call', site_visit: 'Site Visit',
+  email: 'Email', data_review: 'Data Review', risk_response: 'Risk Response',
+  client_request: 'Client Request', internal_review: 'Internal Review', other: 'Other',
+}
+
+const emptyAction = {
+  description: '', owner_name: '', due_date: '', priority: 'normal', source: 'manual', source_detail: '', notes: '',
+}
+
+function ActionsTab({ actions, projectId, onReload }) {
+  const [showForm, setShowForm] = useState(false)
+  const [form, setForm] = useState({ ...emptyAction })
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState(null)
+
+  const openActions = actions.filter(a => a.status !== 'closed' && a.status !== 'superseded')
+  const closedActions = actions.filter(a => a.status === 'closed' || a.status === 'superseded')
+
+  async function handleAdd() {
+    if (!form.description.trim()) { setMessage({ type: 'error', text: 'Description is required.' }); return }
+    if (!form.owner_name.trim()) { setMessage({ type: 'error', text: 'Owner is required.' }); return }
+
+    setSaving(true); setMessage(null)
+    const { error } = await supabase.from('project_actions').insert({
+      sector_id: PCS_SECTOR_ID,
+      project_id: projectId,
+      action_ref: '',  // auto-generated by trigger
+      description: form.description.trim(),
+      owner_name: form.owner_name.trim(),
+      due_date: form.due_date || null,
+      priority: form.priority,
+      source: form.source,
+      source_detail: form.source_detail.trim() || null,
+      notes: form.notes.trim() || null,
+    })
+
+    if (error) {
+      setMessage({ type: 'error', text: error.message })
+    } else {
+      setMessage({ type: 'success', text: 'Action added.' })
+      setForm({ ...emptyAction })
+      setShowForm(false)
+      onReload()
+    }
+    setSaving(false)
+  }
+
+  async function handleStatusChange(actionId, newStatus) {
+    await supabase.from('project_actions').update({ status: newStatus }).eq('id', actionId)
+    onReload()
+  }
+
+  const inputStyle = {
+    width: '100%', padding: '8px 12px', border: `1px solid ${BRAND.greyBorder}`,
+    fontFamily: BRAND.font, fontSize: '13px', color: BRAND.coolGrey, background: BRAND.white, boxSizing: 'border-box',
+  }
+
+  return (
+    <>
+      {/* Add Action button */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <span style={{ fontSize: '15px', color: BRAND.purple }}>
+          {openActions.length} open action{openActions.length !== 1 ? 's' : ''}
+          {closedActions.length > 0 && <span style={{ fontSize: '12px', color: BRAND.coolGrey, marginLeft: '8px' }}>({closedActions.length} closed)</span>}
+        </span>
+        {!showForm && (
+          <button onClick={() => setShowForm(true)} style={{
+            padding: '8px 20px', background: BRAND.purple, color: BRAND.white,
+            border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px',
+          }}>Add Action</button>
+        )}
+      </div>
+
+      {message && (
+        <div style={{ padding: '10px 16px', marginBottom: '16px', fontSize: '13px',
+          background: message.type === 'error' ? '#FDECEC' : '#E8F5E8',
+          color: message.type === 'error' ? BRAND.red : BRAND.green,
+        }}>{message.text}</div>
+      )}
+
+      {/* Add Action Form */}
+      {showForm && (
+        <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, padding: '20px', marginBottom: '20px' }}>
+          <span style={{ fontSize: '14px', color: BRAND.purple, display: 'block', marginBottom: '16px' }}>New Action</span>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+            <div style={{ gridColumn: '1 / -1' }}>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Description</label>
+              <textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })}
+                rows={2} style={{ ...inputStyle, resize: 'vertical' }} placeholder="What needs to be done?" />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Owner</label>
+              <input value={form.owner_name} onChange={e => setForm({ ...form, owner_name: e.target.value })}
+                style={inputStyle} placeholder="Who is responsible?" />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Due Date</label>
+              <input type="date" value={form.due_date} onChange={e => setForm({ ...form, due_date: e.target.value })} style={inputStyle} />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Priority</label>
+              <select value={form.priority} onChange={e => setForm({ ...form, priority: e.target.value })} style={inputStyle}>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="normal">Normal</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Source</label>
+              <select value={form.source} onChange={e => setForm({ ...form, source: e.target.value })} style={inputStyle}>
+                {Object.entries(sourceLabels).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Source Detail</label>
+              <input value={form.source_detail} onChange={e => setForm({ ...form, source_detail: e.target.value })}
+                style={inputStyle} placeholder="e.g. Call with Jane Smith 2026-02-14" />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', color: BRAND.coolGrey, marginBottom: '4px' }}>Notes</label>
+              <input value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })}
+                style={inputStyle} placeholder="Additional context (optional)" />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+            <button onClick={() => { setShowForm(false); setForm({ ...emptyAction }); setMessage(null) }} style={{
+              padding: '8px 20px', background: BRAND.white, color: BRAND.coolGrey,
+              border: `1px solid ${BRAND.greyBorder}`, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px',
+            }}>Cancel</button>
+            <button onClick={handleAdd} disabled={saving} style={{
+              padding: '8px 20px', background: BRAND.purple, color: BRAND.white,
+              border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px',
+            }}>{saving ? 'Saving...' : 'Add Action'}</button>
+          </div>
+        </div>
+      )}
+
+      {/* Open Actions Table */}
+      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '24px' }}>
+        <DataTable
+          columns={[
+            { header: 'Ref', accessor: 'action_ref', nowrap: true },
+            { header: 'Description', accessor: 'description' },
+            { header: 'Owner', accessor: 'owner_name' },
+            { header: 'Due', render: r => {
+              const isOverdue = r.due_date && new Date(r.due_date) < new Date()
+              return <span style={{ color: isOverdue ? BRAND.red : BRAND.coolGrey }}>{formatDate(r.due_date)}</span>
+            }, nowrap: true },
+            { header: 'Priority', render: r => <StatusBadge status={r.priority} map={actionPriorityMap} /> },
+            { header: 'Status', render: r => (
+              <select
+                value={r.status}
+                onChange={e => handleStatusChange(r.id, e.target.value)}
+                style={{
+                  padding: '3px 8px', fontSize: '12px', border: `1px solid ${BRAND.greyBorder}`,
+                  fontFamily: BRAND.font, color: BRAND.coolGrey, background: BRAND.white, cursor: 'pointer',
+                }}
+              >
+                <option value="open">Open</option>
+                <option value="in_progress">In Progress</option>
+                <option value="closed">Closed</option>
+              </select>
+            )},
+            { header: 'Source', render: r => (
+              <span style={{ fontSize: '12px' }}>
+                {sourceLabels[r.source] || r.source}
+                {r.source_detail && <span style={{ color: BRAND.coolGrey, marginLeft: '4px' }}>({r.source_detail})</span>}
+              </span>
+            )},
+          ]}
+          data={openActions}
+          emptyMessage="No open actions. Add one using the button above."
+        />
+      </div>
+
+      {/* Closed Actions */}
+      {closedActions.length > 0 && (
+        <>
+          <span style={{ fontSize: '15px', color: BRAND.purple, display: 'block', marginBottom: '12px' }}>Closed Actions</span>
+          <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}` }}>
+            <DataTable
+              columns={[
+                { header: 'Ref', accessor: 'action_ref', nowrap: true },
+                { header: 'Description', accessor: 'description' },
+                { header: 'Owner', accessor: 'owner_name' },
+                { header: 'Completed', render: r => formatDate(r.completed_date), nowrap: true },
+                { header: 'Status', render: r => <StatusBadge status={r.status} map={actionStatusMap} /> },
+              ]}
+              data={closedActions}
+            />
+          </div>
+        </>
+      )}
+    </>
   )
 }

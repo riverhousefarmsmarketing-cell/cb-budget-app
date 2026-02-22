@@ -102,11 +102,36 @@ export default function ActionTrackerPage() {
 
   if (loading) return <LoadingState message="Loading action tracker..." />
 
+  function downloadCSV() {
+    const headers = ['Ref', 'Description', 'Owner', 'Project Code', 'Project Name', 'Due Date', 'Urgency', 'Priority', 'Status', 'Source', 'Source Detail']
+    const rows = filtered.map(a => [
+      a.action_ref || '', (a.action_description || '').replace(/,/g, ';'), a.owner_name || '',
+      a.project_code || '', (a.project_name || '').replace(/,/g, ';'),
+      a.due_date || '', a.urgency || '', a.priority || '', a.status || '',
+      sourceTypeLabels[a.source_type] || a.source_type || '', a.source_ref || '',
+    ])
+    const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n')
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    const filterLabel = filterProject !== 'all' ? `_${filterProject}` : filterOwner !== 'all' ? `_${filterOwner.replace(/\s/g, '_')}` : '_all'
+    a.download = `PCS_Actions${filterLabel}_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   return (
     <div>
       <SectionHeader
         title="Action Tracker"
         subtitle="All open actions across all projects — sorted by urgency"
+        action={
+          <button onClick={downloadCSV} style={{
+            padding: '8px 20px', background: BRAND.purple, color: BRAND.white,
+            border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px',
+          }}>Download CSV</button>
+        }
       />
 
       {/* KPIs */}

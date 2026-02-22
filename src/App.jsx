@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { useAuth } from './hooks/useAuth'
 import { NavProvider, useNav } from './hooks/useNav'
+import LandingPage, { isDemoAuthenticated } from './pages/LandingPage'
 import AppShell from './layouts/AppShell'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
@@ -9,6 +11,8 @@ import HoursRevenuePage from './pages/HoursRevenuePage'
 import CommercialPage from './pages/CommercialPage'
 import ForecastPlannerPage from './pages/ForecastPlannerPage'
 import ActionTrackerPage from './pages/ActionTrackerPage'
+import RAIDLogPage from './pages/RAIDLogPage'
+import QualityDashboardPage from './pages/QualityDashboardPage'
 import SettingsPage from './pages/SettingsPage'
 import ProjectProfilePage from './pages/ProjectProfilePage'
 import EmployeeProfilePage from './pages/EmployeeProfilePage'
@@ -22,6 +26,8 @@ const VIEW_MAP = {
   commercial: CommercialPage,
   forecast: ForecastPlannerPage,
   actions: ActionTrackerPage,
+  raid: RAIDLogPage,
+  quality: QualityDashboardPage,
   settings: SettingsPage,
 }
 
@@ -40,7 +46,6 @@ function AppContent() {
 
   if (!session) return <LoginPage onSignIn={signIn} />
 
-  // Global drill-down: profile pages overlay from any context
   let content
   if (drillDown?.type === 'project') {
     content = <ProjectProfilePage projectId={drillDown.id} onBack={goBack} />
@@ -61,6 +66,13 @@ function AppContent() {
 }
 
 export default function App() {
+  const [demoAccess, setDemoAccess] = useState(isDemoAuthenticated())
+
+  // Landing page gate — must enter access code before reaching the app
+  if (!demoAccess) {
+    return <LandingPage onEnter={() => setDemoAccess(true)} />
+  }
+
   return (
     <NavProvider>
       <AppContent />

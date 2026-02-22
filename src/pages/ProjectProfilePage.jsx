@@ -1,9 +1,13 @@
-import { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import { BRAND } from '../lib/brand'
 import { formatCurrencyExact, formatCurrency, formatDate, formatPct } from '../lib/utils'
 import { supabase } from '../lib/supabase'
 import { PCS_SECTOR_ID, useClients, useEmployees } from '../hooks/useData'
 import { SectionHeader, LoadingState, StatusBadge, DataTable, KPICard, EmployeeLink } from '../components/SharedUI'
+import AccountActionPlanSection from '../components/AccountActionPlanSection'
+import QualityPlanSection from '../components/QualityPlanSection'
+import { ApprovalBanner, isLocked } from '../components/ApprovalWorkflow'
+import { auditDelete, auditDeleteWithData } from '../lib/auditDelete'
 
 // ============================================================================
 // Shared form styles
@@ -194,6 +198,9 @@ export default function ProjectProfilePage({ projectId, onBack }) {
   const [documents, setDocuments] = useState([])
   const [healthScore, setHealthScore] = useState(null)
   const [projectActions, setProjectActions] = useState([])
+  const [accountPlans, setAccountPlans] = useState([])
+  const [accountPlanActions, setAccountPlanActions] = useState([])
+  const [qualityItems, setQualityItems] = useState([])
 
   useEffect(() => { loadAll() }, [projectId])
 
@@ -233,7 +240,7 @@ export default function ProjectProfilePage({ projectId, onBack }) {
       setInvoices(inv || [])
     }
 
-    const [contactsRes, risksRes, lessonsRes, savingsRes, meetingsRes, variationsRes, documentsRes, healthRes, actionsRes] = await Promise.all([
+    const [contactsRes, risksRes, lessonsRes, savingsRes, meetingsRes, variationsRes, documentsRes, healthRes, actionsRes, acctPlansRes, acctActionsRes, qualityRes] = await Promise.all([
       supabase.from('project_contacts').select('*').eq('project_id', projectId).order('is_primary', { ascending: false }),
       supabase.from('project_risks').select('*').eq('project_id', projectId).order('identified_date', { ascending: false }),
       supabase.from('project_lessons').select('*').eq('project_id', projectId).order('lesson_date', { ascending: false }),
@@ -243,6 +250,9 @@ export default function ProjectProfilePage({ projectId, onBack }) {
       supabase.from('project_documents').select('*').eq('project_id', projectId).order('document_ref', { ascending: true }),
       supabase.from('v_project_health').select('*').eq('project_id', projectId).maybeSingle(),
       supabase.from('project_actions').select('*').eq('project_id', projectId).order('created_at', { ascending: false }),
+      supabase.from('account_action_plans').select('*').eq('sector_id', PCS_SECTOR_ID),
+      supabase.from('account_actions').select('*').eq('sector_id', PCS_SECTOR_ID),
+      supabase.from('quality_plan_items').select('*').eq('sector_id', PCS_SECTOR_ID),
     ])
 
     setContacts(contactsRes.data || [])
@@ -254,6 +264,9 @@ export default function ProjectProfilePage({ projectId, onBack }) {
     setDocuments(documentsRes.data || [])
     setHealthScore(healthRes.data)
     setProjectActions(actionsRes.data || [])
+    setAccountPlans(acctPlansRes.data || [])
+    setAccountPlanActions(acctActionsRes.data || [])
+    setQualityItems(qualityRes.data || [])
     setLoading(false)
   }
 
@@ -320,6 +333,8 @@ export default function ProjectProfilePage({ projectId, onBack }) {
     { key: 'savings', label: 'Savings Log', count: savings.length },
     { key: 'variations', label: 'Change Orders', count: variations.length },
     { key: 'documents', label: 'Key Documents', count: documents.length },
+    { key: 'accountplan', label: 'Account Plan', count: accountPlanActions.filter(a => a.project_id === projectId).length },
+    { key: 'quality', label: 'Quality Plan', count: qualityItems.filter(i => i.project_id === projectId || (i.client_id === project?.client_id && !i.project_id)).length },
   ]
 
   const commonProps = { projectId, employees, onReload: loadAll, clientName: client?.name || '' }
@@ -390,6 +405,23 @@ export default function ProjectProfilePage({ projectId, onBack }) {
       {activeTab === 'savings' && <SavingsTab savings={savings} {...commonProps} />}
       {activeTab === 'variations' && <VariationsTab variations={variations} {...commonProps} />}
       {activeTab === 'documents' && <DocumentsTab documents={documents} {...commonProps} />}
+      {activeTab === 'accountplan' && (
+        <AccountActionPlanSection
+          plans={accountPlans} planActions={accountPlanActions}
+          projects={[]} projectMap={{}} projectId={projectId}
+          clientId={project.client_id} clientName={client?.name || ''}
+          employees={employees}
+          onReload={loadAll} mode="project"
+        />
+      )}
+      {activeTab === 'quality' && (
+        <QualityPlanSection
+          items={qualityItems} projectId={projectId}
+          clientId={project.client_id} projects={[]}
+          projectMap={{}} onReload={loadAll} mode="project"
+          employees={employees}
+        />
+      )}
     </div>
   )
 }
@@ -579,7 +611,7 @@ function ContactsTab({ contacts, projectId, employees, onReload, clientName }) {
 
   async function handleAdd() {
     if (!f.name.trim()) { setMsg({ type: 'error', text: 'Name is required.' }); return }
-    if (!f.organisation.trim()) { setMsg({ type: 'error', text: 'Organisation is required.' }); return }
+    if (!f.organisation.trim()) { setMsg({ type: 'error', text: 'Organization is required.' }); return }
     setSaving(true); setMsg(null)
     const { error } = await supabase.from('project_contacts').insert({
       sector_id: PCS_SECTOR_ID, project_id: projectId,
@@ -605,20 +637,20 @@ function ContactsTab({ contacts, projectId, employees, onReload, clientName }) {
           <FormMessage msg={msg} />
           <FormGrid>
             <FormField label="Name"><input value={f.name} onChange={e => setF({ ...f, name: e.target.value })} style={formInputStyle} placeholder="Full name" /></FormField>
-            <FormField label="Organisation">
+            <FormField label="Organization">
               <select value={orgOptions.includes(f.organisation) ? f.organisation : '__other'} onChange={e => {
                 if (e.target.value === '__other') setF({ ...f, organisation: '' })
                 else setF({ ...f, organisation: e.target.value })
               }} style={formInputStyle}>
-                <option value="">Select organisation...</option>
+                <option value="">Select organization...</option>
                 {orgOptions.map(o => <option key={o} value={o}>{o}</option>)}
                 <option value="__other">Other...</option>
               </select>
               {!orgOptions.includes(f.organisation) && f.organisation !== '' && (
-                <input value={f.organisation} onChange={e => setF({ ...f, organisation: e.target.value })} style={{ ...formInputStyle, marginTop: '6px' }} placeholder="Enter organisation name" />
+                <input value={f.organisation} onChange={e => setF({ ...f, organisation: e.target.value })} style={{ ...formInputStyle, marginTop: '6px' }} placeholder="Enter organization name" />
               )}
               {f.organisation === '' && (
-                <input value="" onChange={e => setF({ ...f, organisation: e.target.value })} style={{ ...formInputStyle, marginTop: '6px' }} placeholder="Enter organisation name" />
+                <input value="" onChange={e => setF({ ...f, organisation: e.target.value })} style={{ ...formInputStyle, marginTop: '6px' }} placeholder="Enter organization name" />
               )}
             </FormField>
             <FormField label="Role"><input value={f.role} onChange={e => setF({ ...f, role: e.target.value })} style={formInputStyle} placeholder="e.g. Program Director" /></FormField>
@@ -639,7 +671,7 @@ function ContactsTab({ contacts, projectId, employees, onReload, clientName }) {
       <span style={{ fontSize: '15px', color: BRAND.purple, display: 'block', marginBottom: '12px' }}>Client Stakeholders</span>
       <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '24px' }}>
         <DataTable columns={[
-          { header: 'Name', accessor: 'name' }, { header: 'Organisation', accessor: 'organisation' },
+          { header: 'Name', accessor: 'name' }, { header: 'Organization', accessor: 'organisation' },
           { header: 'Role', accessor: 'role' },
           { header: 'Type', render: r => <StatusBadge status={r.stakeholder_type} map={stakeholderTypeMap} /> },
           { header: 'Primary', render: r => r.is_primary ? 'Yes' : '' },
@@ -661,15 +693,116 @@ function ContactsTab({ contacts, projectId, employees, onReload, clientName }) {
 }
 
 // ============================================================================
-// MEETINGS TAB
+// MEETINGS TAB — unified minutes with line items (agenda + actions merged)
 // ============================================================================
+const minutesStatusMap = {
+  not_started: { bg: BRAND.greyLight, text: BRAND.coolGrey, label: 'Not Started' },
+  draft: { bg: '#FFF4E5', text: BRAND.amber, label: 'Draft' },
+  issued: { bg: '#E8F4FD', text: BRAND.blue, label: 'Issued' },
+  accepted: { bg: '#E8F5E8', text: BRAND.green, label: 'Accepted' },
+}
+const meetingStatusMap = {
+  scheduled: { bg: '#E8F4FD', text: BRAND.blue, label: 'Scheduled' },
+  in_progress: { bg: '#FFF4E5', text: BRAND.amber, label: 'In Progress' },
+  completed: { bg: '#E8F5E8', text: BRAND.green, label: 'Completed' },
+  cancelled: { bg: BRAND.greyLight, text: BRAND.coolGrey, label: 'Cancelled' },
+}
+const attendanceMap = {
+  invited: { bg: BRAND.greyLight, text: BRAND.coolGrey, label: 'Invited' },
+  present: { bg: '#E8F5E8', text: BRAND.green, label: 'Present' },
+  apologies: { bg: '#FFF4E5', text: BRAND.amber, label: 'Apologies' },
+  absent: { bg: '#FDECEC', text: BRAND.red, label: 'Absent' },
+}
+const meetingActionStatusMap = {
+  open: { bg: '#FFF4E5', text: BRAND.amber, label: 'Open' },
+  in_progress: { bg: '#E8F4FD', text: BRAND.blue, label: 'In Progress' },
+  closed: { bg: '#E8F5E8', text: BRAND.green, label: 'Closed' },
+  superseded: { bg: BRAND.greyLight, text: BRAND.coolGrey, label: 'Superseded' },
+}
+
+const mtgTh = { background: BRAND.purple, color: BRAND.white, padding: '8px 12px', textAlign: 'left', fontWeight: 400, whiteSpace: 'nowrap', fontSize: '12px' }
+const mtgTd = (i) => ({ padding: '8px 12px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '12px', background: i % 2 === 0 ? BRAND.white : BRAND.greyLight })
+
 function MeetingsTab({ meetings, projectId, employees, onReload }) {
-  const [expanded, setExpanded] = useState(null)
+  const [selectedMeeting, setSelectedMeeting] = useState(null)
   const [showForm, setShowForm] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
-  const [f, setF] = useState({ title: '', meeting_date: '', meeting_type: 'progress', location: '', notes: '', client_sentiment: '' })
+  const [f, setF] = useState({ title: '', meeting_date: '', meeting_type: 'project', location: '', notes: '', client_sentiment: '', start_time: '', end_time: '', next_meeting_date: '' })
 
+  // Detail data
+  const [attendees, setAttendees] = useState([])
+  const [lineItems, setLineItems] = useState([]) // merged agenda+action data
+  const [decisions, setDecisions] = useState([])
+  const [detailLoading, setDetailLoading] = useState(false)
+
+  // Sub-forms
+  const [showAttendeeForm, setShowAttendeeForm] = useState(false)
+  const [showLineItemForm, setShowLineItemForm] = useState(false)
+  const [showDecisionForm, setShowDecisionForm] = useState(false)
+  const [editingItem, setEditingItem] = useState(null)
+  const [editForm, setEditForm] = useState({})
+  const [templates, setTemplates] = useState([])
+  const [showTemplateMenu, setShowTemplateMenu] = useState(false)
+  const [af, setAf] = useState({ employee_id: '', external_name: '', external_organisation: '', external_role: '', attendance_status: 'invited' })
+  const [lf, setLf] = useState({ title: '', description: '', owner_employee_id: '', owner_name: '', due_date: '', priority: 'normal', duration_minutes: '' })
+  const [df, setDf] = useState({ description: '', agreed_by: '' })
+
+  const empMap = Object.fromEntries((employees || []).map(e => [e.id, e]))
+
+  // Load templates from app_settings
+  useEffect(() => {
+    supabase.from('app_settings').select('*').eq('sector_id', PCS_SECTOR_ID).like('setting_key', 'meeting_template_%')
+      .then(({ data }) => {
+        const parsed = (data || []).map(d => {
+          try { return { id: d.id, key: d.setting_key, ...JSON.parse(d.setting_value) } }
+          catch { return null }
+        }).filter(Boolean)
+        setTemplates(parsed)
+      })
+  }, [])
+
+  async function applyTemplate(template) {
+    if (!selectedMeeting) return
+    setSaving(true)
+    const startOrder = lineItems.length > 0 ? Math.max(...lineItems.map(a => a.item_order)) + 1 : 1
+    for (let i = 0; i < template.items.length; i++) {
+      await supabase.from('meeting_agenda_items').insert({
+        meeting_id: selectedMeeting, sector_id: PCS_SECTOR_ID,
+        item_order: startOrder + i, title: template.items[i],
+      })
+    }
+    setSaving(false); setShowTemplateMenu(false); loadDetail(selectedMeeting)
+  }
+
+  async function loadDetail(meetingId) {
+    setDetailLoading(true)
+    const [attRes, agRes, actRes, decRes] = await Promise.all([
+      supabase.from('meeting_attendees').select('*').eq('meeting_id', meetingId).order('created_at'),
+      supabase.from('meeting_agenda_items').select('*').eq('meeting_id', meetingId).order('item_order'),
+      supabase.from('meeting_actions').select('*').eq('meeting_id', meetingId).order('action_ref'),
+      supabase.from('meeting_decisions').select('*').eq('meeting_id', meetingId).order('decision_ref'),
+    ])
+    // Merge: each agenda item is a line item, with its linked action (if any) joined
+    const agendaItems = agRes.data || []
+    const actionItems = actRes.data || []
+    const merged = agendaItems.map(ag => {
+      const linkedAction = actionItems.find(a => a.agenda_item_id === ag.id)
+      return { ...ag, action: linkedAction || null }
+    })
+    setLineItems(merged)
+    setAttendees(attRes.data || [])
+    setDecisions(decRes.data || [])
+    setDetailLoading(false)
+  }
+
+  function openMeeting(meetingId) {
+    setSelectedMeeting(meetingId)
+    setEditingItem(null)
+    loadDetail(meetingId)
+  }
+
+  // ===== Meeting CRUD =====
   async function handleAdd() {
     if (!f.title.trim()) { setMsg({ type: 'error', text: 'Title is required.' }); return }
     if (!f.meeting_date) { setMsg({ type: 'error', text: 'Date is required.' }); return }
@@ -679,66 +812,645 @@ function MeetingsTab({ meetings, projectId, employees, onReload }) {
       title: f.title.trim(), meeting_date: f.meeting_date, meeting_type: f.meeting_type,
       location: f.location.trim() || null, notes: f.notes.trim() || null,
       client_sentiment: f.client_sentiment || null, status: 'scheduled',
+      start_time: f.start_time || null, end_time: f.end_time || null,
+      next_meeting_date: f.next_meeting_date || null,
     })
     if (error) { setMsg({ type: 'error', text: error.message }) }
-    else { setF({ title: '', meeting_date: '', meeting_type: 'progress', location: '', notes: '', client_sentiment: '' }); setShowForm(false); onReload() }
+    else { setF({ title: '', meeting_date: '', meeting_type: 'project', location: '', notes: '', client_sentiment: '', start_time: '', end_time: '', next_meeting_date: '' }); setShowForm(false); onReload() }
     setSaving(false)
   }
 
+  async function updateMeetingField(meetingId, field, value) {
+    await supabase.from('meetings').update({ [field]: value }).eq('id', meetingId)
+    onReload()
+  }
+
+  // ===== Attendees =====
+  async function addAttendee() {
+    if (!af.employee_id && !af.external_name.trim()) return
+    setSaving(true)
+    await supabase.from('meeting_attendees').insert({
+      meeting_id: selectedMeeting, sector_id: PCS_SECTOR_ID,
+      employee_id: af.employee_id || null,
+      external_name: af.external_name.trim() || null,
+      external_organisation: af.external_organisation.trim() || null,
+      external_role: af.external_role.trim() || null,
+      attendance_status: af.attendance_status,
+    })
+    setAf({ employee_id: '', external_name: '', external_organisation: '', external_role: '', attendance_status: 'invited' })
+    setShowAttendeeForm(false); setSaving(false); loadDetail(selectedMeeting)
+  }
+
+  async function updateAttendance(id, status) {
+    await supabase.from('meeting_attendees').update({ attendance_status: status }).eq('id', id)
+    loadDetail(selectedMeeting)
+  }
+
+  async function deleteAttendee(id) {
+    await auditDelete('meeting_attendees', id)
+    loadDetail(selectedMeeting)
+  }
+
+  // ===== Unified Line Items (agenda + auto-linked action) =====
+  function buildItemRef(mtg, order) {
+    return `${mtg.meeting_number}-${String(order).padStart(2, '0')}`
+  }
+
+  async function addLineItem() {
+    if (!lf.title.trim()) return
+    setSaving(true)
+    const mtg = meetings.find(m => m.id === selectedMeeting)
+    const nextOrder = lineItems.length > 0 ? Math.max(...lineItems.map(a => a.item_order)) + 1 : 1
+
+    // Create agenda item
+    const { data: agData, error: agError } = await supabase.from('meeting_agenda_items').insert({
+      meeting_id: selectedMeeting, sector_id: PCS_SECTOR_ID,
+      item_order: nextOrder, title: lf.title.trim(),
+      description: lf.description.trim() || null,
+      duration_minutes: lf.duration_minutes ? parseInt(lf.duration_minutes) : null,
+    }).select()
+
+    // If owner or due date provided, create linked action
+    if (!agError && agData?.[0] && (lf.owner_employee_id || lf.owner_name.trim() || lf.due_date)) {
+      const ownerEmp = empMap[lf.owner_employee_id]
+      await supabase.from('meeting_actions').insert({
+        meeting_id: selectedMeeting, sector_id: PCS_SECTOR_ID,
+        project_id: projectId,
+        action_ref: '', // auto-generated by trigger
+        description: lf.title.trim(),
+        owner_employee_id: lf.owner_employee_id || null,
+        owner_name: lf.owner_employee_id ? (ownerEmp?.name || '') : lf.owner_name.trim(),
+        due_date: lf.due_date || null,
+        priority: lf.priority,
+        agenda_item_id: agData[0].id,
+      })
+    }
+
+    setLf({ title: '', description: '', owner_employee_id: '', owner_name: '', due_date: '', priority: 'normal', duration_minutes: '' })
+    setShowLineItemForm(false); setSaving(false); loadDetail(selectedMeeting)
+  }
+
+  async function updateLineItemNotes(agendaId, notes) {
+    await supabase.from('meeting_agenda_items').update({ discussion_notes: notes, updated_at: new Date().toISOString() }).eq('id', agendaId)
+  }
+
+  async function saveItemEdits(item) {
+    setSaving(true)
+    const ef = editForm
+
+    // Update agenda item
+    await supabase.from('meeting_agenda_items').update({
+      title: ef.title || item.title,
+      description: ef.description ?? item.description,
+      updated_at: new Date().toISOString(),
+    }).eq('id', item.id)
+
+    // Handle action: create, update, or leave alone
+    const hasOwner = ef.owner_employee_id || ef.owner_name?.trim() || ef.due_date
+    if (item.action && hasOwner) {
+      // Update existing action
+      const ownerEmp = empMap[ef.owner_employee_id]
+      const updates = {
+        description: ef.title || item.title,
+        owner_employee_id: ef.owner_employee_id || null,
+        owner_name: ef.owner_employee_id ? (ownerEmp?.name || '') : (ef.owner_name?.trim() || item.action.owner_name),
+        due_date: ef.due_date || null,
+        priority: ef.priority || item.action.priority,
+      }
+      if (ef.action_status) updates.status = ef.action_status
+      if (ef.action_status === 'closed') updates.completed_date = new Date().toISOString().slice(0, 10)
+      await supabase.from('meeting_actions').update(updates).eq('id', item.action.id)
+    } else if (!item.action && hasOwner) {
+      // Create new linked action
+      const ownerEmp = empMap[ef.owner_employee_id]
+      await supabase.from('meeting_actions').insert({
+        meeting_id: selectedMeeting, sector_id: PCS_SECTOR_ID,
+        project_id: projectId, action_ref: '',
+        description: ef.title || item.title,
+        owner_employee_id: ef.owner_employee_id || null,
+        owner_name: ef.owner_employee_id ? (ownerEmp?.name || '') : (ef.owner_name?.trim() || ''),
+        due_date: ef.due_date || null,
+        priority: ef.priority || 'normal',
+        agenda_item_id: item.id,
+      })
+    }
+
+    setEditingItem(null); setEditForm({}); setSaving(false); loadDetail(selectedMeeting)
+  }
+
+  async function deleteLineItem(item) {
+    if (item.action) await auditDelete('meeting_actions', item.action.id, item.action)
+    await auditDelete('meeting_agenda_items', item.id, item)
+    loadDetail(selectedMeeting)
+  }
+
+  function startEdit(item) {
+    setEditingItem(item.id)
+    setEditForm({
+      title: item.title,
+      description: item.description || '',
+      owner_employee_id: item.action?.owner_employee_id || '',
+      owner_name: item.action?.owner_name || '',
+      due_date: item.action?.due_date || '',
+      priority: item.action?.priority || 'normal',
+      action_status: item.action?.status || 'open',
+    })
+  }
+
+  // ===== Decisions =====
+  async function addDecision() {
+    if (!df.description.trim()) return
+    setSaving(true)
+    const nextRef = 'D-' + String(decisions.length + 1).padStart(2, '0')
+    const mtg = meetings.find(m => m.id === selectedMeeting)
+    await supabase.from('meeting_decisions').insert({
+      meeting_id: selectedMeeting, sector_id: PCS_SECTOR_ID,
+      decision_ref: nextRef, description: df.description.trim(),
+      agreed_by: df.agreed_by.trim() || null,
+      decision_date: mtg?.meeting_date || new Date().toISOString().slice(0, 10),
+    })
+    setDf({ description: '', agreed_by: '' })
+    setShowDecisionForm(false); setSaving(false); loadDetail(selectedMeeting)
+  }
+
+  async function deleteDecision(id) {
+    await auditDelete('meeting_decisions', id)
+    loadDetail(selectedMeeting)
+  }
+
+  function downloadMeetingMinutes(mtg) {
+    const lines = []
+    lines.push('MEETING MINUTES')
+    lines.push('=' .repeat(60))
+    lines.push(`Title: ${mtg.title}`)
+    lines.push(`Date: ${formatDate(mtg.meeting_date)}`)
+    lines.push(`Time: ${mtg.start_time || ''} - ${mtg.end_time || ''}`)
+    lines.push(`Location: ${mtg.location || '—'}`)
+    lines.push(`Type: ${(mtg.meeting_type || '').replace(/_/g, ' ')}`)
+    lines.push(`Status: ${mtg.status}`)
+    lines.push(`Minutes Status: ${(mtg.minutes_status || '').replace(/_/g, ' ')}`)
+    lines.push(`Client Sentiment: ${(mtg.client_sentiment || '—').replace(/_/g, ' ')}`)
+    lines.push('')
+
+    if (attendees.length > 0) {
+      lines.push('ATTENDEES')
+      lines.push('-'.repeat(40))
+      attendees.forEach(a => lines.push(`  ${a.external_name || '—'} (${a.external_organisation || '—'}) — ${a.attended ? 'Present' : 'Absent'}`))
+      lines.push('')
+    }
+
+    if (lineItems.length > 0) {
+      lines.push('AGENDA / MINUTES')
+      lines.push('-'.repeat(40))
+      lineItems.forEach((item, idx) => {
+        lines.push(`${idx + 1}. ${item.title || 'Untitled'}`)
+        if (item.notes) lines.push(`   Notes: ${item.notes}`)
+        if (item.action) {
+          lines.push(`   ACTION: ${item.action.description || '—'}`)
+          lines.push(`   Owner: ${item.action.owner_name || '—'} | Due: ${item.action.due_date ? formatDate(item.action.due_date) : '—'} | Status: ${item.action.status || '—'}`)
+        }
+        lines.push('')
+      })
+    }
+
+    if (decisions.length > 0) {
+      lines.push('DECISIONS')
+      lines.push('-'.repeat(40))
+      decisions.forEach(d => {
+        lines.push(`  ${d.decision_ref || ''}: ${d.description || ''}`)
+        if (d.made_by) lines.push(`    Made by: ${d.made_by}`)
+      })
+      lines.push('')
+    }
+
+    if (mtg.notes) {
+      lines.push('NOTES')
+      lines.push('-'.repeat(40))
+      lines.push(mtg.notes)
+    }
+
+    lines.push('')
+    lines.push(`Generated: ${new Date().toLocaleString()}`)
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `Minutes_${(mtg.title || 'meeting').replace(/\s+/g, '_')}_${mtg.meeting_date || 'undated'}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // =====================================================================
+  // MEETING DETAIL VIEW
+  // =====================================================================
+  if (selectedMeeting) {
+    const mtg = meetings.find(m => m.id === selectedMeeting)
+    if (!mtg) { setSelectedMeeting(null); return null }
+    const present = attendees.filter(a => a.attendance_status === 'present').length
+    const openActions = lineItems.filter(li => li.action && li.action.status !== 'closed' && li.action.status !== 'superseded').length
+    const totalActions = lineItems.filter(li => li.action).length
+
+    return (
+      <div>
+        <button onClick={() => { setSelectedMeeting(null); setEditingItem(null) }} style={{ background: 'none', border: 'none', color: BRAND.purple, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px', padding: 0, marginBottom: '16px' }}>Back to meetings</button>
+
+        {/* Header */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+          <div>
+            <div style={{ fontSize: '18px', color: BRAND.purple }}>{mtg.meeting_number} — {mtg.title}</div>
+            <div style={{ fontSize: '13px', color: BRAND.coolGrey, marginTop: '4px', display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+              <span>{formatDate(mtg.meeting_date)}</span>
+              {mtg.start_time && <span>{mtg.start_time?.slice(0,5)}{mtg.end_time ? ` - ${mtg.end_time.slice(0,5)}` : ''}</span>}
+              <span style={{ textTransform: 'capitalize' }}>{(mtg.meeting_type || '').replace(/_/g, ' ')}</span>
+              {mtg.location && <span>{mtg.location}</span>}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+            {mtg.client_sentiment && <StatusBadge status={mtg.client_sentiment} map={sentimentMap} />}
+            <select value={mtg.status} onChange={e => updateMeetingField(mtg.id, 'status', e.target.value)} style={{ padding: '4px 8px', border: `1px solid ${BRAND.greyBorder}`, fontFamily: BRAND.font, fontSize: '12px', color: BRAND.coolGrey, background: BRAND.white }}>
+              <option value="scheduled">Scheduled</option><option value="in_progress">In Progress</option>
+              <option value="completed">Completed</option><option value="cancelled">Cancelled</option>
+            </select>
+            <select value={mtg.minutes_status} onChange={e => updateMeetingField(mtg.id, 'minutes_status', e.target.value)} style={{ padding: '4px 8px', border: `1px solid ${BRAND.greyBorder}`, fontFamily: BRAND.font, fontSize: '12px', color: BRAND.coolGrey, background: BRAND.white }}>
+              <option value="not_started">Minutes: Not Started</option><option value="draft">Minutes: Draft</option>
+              <option value="issued">Minutes: Issued</option><option value="accepted">Minutes: Accepted</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Mode banner — clear visual distinction */}
+        {(() => {
+          const isAgendaMode = mtg.status === 'scheduled'
+          const bannerBg = isAgendaMode ? '#E8F4FD' : '#E8F5E8'
+          const bannerColor = isAgendaMode ? BRAND.blue : BRAND.green
+          const bannerText = isAgendaMode
+            ? 'AGENDA MODE — Build your agenda before the meeting. Add attendees, line items, and load templates.'
+            : 'MINUTES MODE — Record discussion notes, assign actions, and log decisions.'
+          return (
+            <div style={{ padding: '12px 20px', background: bannerBg, borderLeft: `4px solid ${bannerColor}`, marginBottom: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+              <span style={{ fontSize: '13px', color: bannerColor, fontFamily: BRAND.font, fontWeight: 600 }}>{bannerText}</span>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {isAgendaMode && (
+                  <button onClick={() => updateMeetingField(mtg.id, 'status', 'in_progress')} style={{ padding: '6px 16px', background: bannerColor, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>Start Meeting</button>
+                )}
+                {!isAgendaMode && (
+                  <button onClick={() => downloadMeetingMinutes(mtg)} style={{ padding: '6px 16px', background: BRAND.purple, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>Download Minutes</button>
+                )}
+              </div>
+            </div>
+          )
+        })()}
+
+        {/* KPIs */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '12px', marginBottom: '20px' }}>
+          <KPICard label="Attendees" value={attendees.length} subValue={`${present} present`} />
+          <KPICard label="Line Items" value={lineItems.length} />
+          <KPICard label="Actions" value={totalActions} color={openActions > 0 ? BRAND.amber : BRAND.green} subValue={`${openActions} open`} />
+          <KPICard label="Decisions" value={decisions.length} />
+        </div>
+
+        {detailLoading ? <LoadingState message="Loading meeting detail..." /> : (
+          <div>
+            {/* ---- ATTENDEES ---- */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontSize: '14px', color: BRAND.purple }}>Attendees</span>
+                <button onClick={() => setShowAttendeeForm(!showAttendeeForm)} style={{ padding: '4px 14px', background: BRAND.purple, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>{showAttendeeForm ? 'Cancel' : 'Add Attendee'}</button>
+              </div>
+              {showAttendeeForm && (
+                <FormWrapper>
+                  <FormGrid cols={3}>
+                    <FormField label="Internal Employee">
+                      <select value={af.employee_id} onChange={e => setAf({ ...af, employee_id: e.target.value })} style={formInputStyle}>
+                        <option value="">-- External --</option>
+                        {(employees || []).map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </FormField>
+                    {!af.employee_id && <FormField label="External Name"><input value={af.external_name} onChange={e => setAf({ ...af, external_name: e.target.value })} style={formInputStyle} placeholder="Full name" /></FormField>}
+                    {!af.employee_id && <FormField label="Organization"><input value={af.external_organisation} onChange={e => setAf({ ...af, external_organisation: e.target.value })} style={formInputStyle} placeholder="Company" /></FormField>}
+                    {!af.employee_id && <FormField label="Role"><input value={af.external_role} onChange={e => setAf({ ...af, external_role: e.target.value })} style={formInputStyle} placeholder="Title / role" /></FormField>}
+                    <FormField label="Attendance">
+                      <select value={af.attendance_status} onChange={e => setAf({ ...af, attendance_status: e.target.value })} style={formInputStyle}>
+                        <option value="invited">Invited</option><option value="present">Present</option>
+                        <option value="apologies">Apologies</option><option value="absent">Absent</option>
+                      </select>
+                    </FormField>
+                  </FormGrid>
+                  <FormButtons onCancel={() => setShowAttendeeForm(false)} onSave={addAttendee} saving={saving} label="Add" />
+                </FormWrapper>
+              )}
+              <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflow: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead><tr>
+                    <th style={mtgTh}>Name</th><th style={mtgTh}>Organization</th><th style={mtgTh}>Role</th><th style={mtgTh}>Attendance</th><th style={{ ...mtgTh, width: '60px' }}></th>
+                  </tr></thead>
+                  <tbody>
+                    {attendees.length === 0 ? (
+                      <tr><td colSpan={5} style={{ padding: '20px', color: BRAND.coolGrey, fontSize: '13px' }}>No attendees added.</td></tr>
+                    ) : attendees.map((a, i) => {
+                      const emp = empMap[a.employee_id]
+                      return (
+                        <tr key={a.id} style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
+                          <td style={mtgTd(i)}>{emp ? <EmployeeLink id={emp.id}>{emp.name}</EmployeeLink> : (a.external_name || '—')}</td>
+                          <td style={mtgTd(i)}>{emp ? 'Currie & Brown' : (a.external_organisation || '—')}</td>
+                          <td style={mtgTd(i)}>{emp ? emp.role : (a.external_role || '—')}</td>
+                          <td style={mtgTd(i)}>
+                            <select value={a.attendance_status} onChange={e => updateAttendance(a.id, e.target.value)} style={{ padding: '2px 6px', border: `1px solid ${BRAND.greyBorder}`, fontFamily: BRAND.font, fontSize: '11px', color: BRAND.coolGrey, background: BRAND.white }}>
+                              <option value="invited">Invited</option><option value="present">Present</option>
+                              <option value="apologies">Apologies</option><option value="absent">Absent</option>
+                            </select>
+                          </td>
+                          <td style={mtgTd(i)}><button onClick={() => deleteAttendee(a.id)} style={{ background: 'none', border: 'none', color: BRAND.red, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '11px' }}>Remove</button></td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* ---- AGENDA / MINUTES (auto-switches based on meeting status) ---- */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                <div>
+                  <span style={{ fontSize: '16px', color: BRAND.purple, fontWeight: 600 }}>
+                    {mtg.status === 'scheduled' ? 'Agenda' : 'Minutes'}
+                  </span>
+                  <span style={{ fontSize: '12px', color: BRAND.coolGrey, marginLeft: '12px' }}>
+                    {mtg.status === 'scheduled' ? 'Add items to build the meeting agenda' : 'Record notes, actions, and owners against each item'}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', position: 'relative' }}>
+                  {templates.length > 0 && (
+                    <div style={{ position: 'relative' }}>
+                      <button onClick={() => setShowTemplateMenu(!showTemplateMenu)} style={{ padding: '4px 14px', background: BRAND.white, color: BRAND.purple, border: `1px solid ${BRAND.greyBorder}`, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>Load Template</button>
+                      {showTemplateMenu && (
+                        <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: '4px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, zIndex: 10, minWidth: '220px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}>
+                          {templates.map(t => (
+                            <button key={t.id} onClick={() => applyTemplate(t)} style={{ display: 'block', width: '100%', padding: '10px 16px', background: 'none', border: 'none', borderBottom: `1px solid ${BRAND.greyBorder}`, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px', color: BRAND.coolGrey, textAlign: 'left' }}
+                              onMouseEnter={e => e.currentTarget.style.background = BRAND.greyLight}
+                              onMouseLeave={e => e.currentTarget.style.background = BRAND.white}
+                            >
+                              <div style={{ color: BRAND.purple, marginBottom: '2px' }}>{t.name}</div>
+                              <div style={{ fontSize: '11px' }}>{t.items.length} item{t.items.length !== 1 ? 's' : ''}</div>
+                            </button>
+                          ))}
+                          <button onClick={() => setShowTemplateMenu(false)} style={{ display: 'block', width: '100%', padding: '8px 16px', background: 'none', border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '11px', color: BRAND.coolGrey, textAlign: 'center' }}>Cancel</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <button onClick={() => setShowLineItemForm(!showLineItemForm)} style={{ padding: '4px 14px', background: BRAND.purple, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>{showLineItemForm ? 'Cancel' : 'Add Line Item'}</button>
+                </div>
+              </div>
+              {showLineItemForm && (
+                <FormWrapper>
+                  <FormGrid cols={3}>
+                    <FormField label="Item / Description" span><input value={lf.title} onChange={e => setLf({ ...lf, title: e.target.value })} style={formInputStyle} placeholder="Agenda item or discussion point" /></FormField>
+                    <FormField label="Detail / Notes" span><textarea value={lf.description} onChange={e => setLf({ ...lf, description: e.target.value })} rows={2} style={{ ...formInputStyle, resize: 'vertical' }} placeholder="Additional context" /></FormField>
+                    <FormField label="Owner (if action required)">
+                      <select value={lf.owner_employee_id} onChange={e => setLf({ ...lf, owner_employee_id: e.target.value })} style={formInputStyle}>
+                        <option value="">No action / external</option>
+                        {(employees || []).map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                      </select>
+                    </FormField>
+                    {!lf.owner_employee_id && <FormField label="External Owner"><input value={lf.owner_name} onChange={e => setLf({ ...lf, owner_name: e.target.value })} style={formInputStyle} placeholder="Full name (if external)" /></FormField>}
+                    <FormField label="Due Date"><input type="date" value={lf.due_date} onChange={e => setLf({ ...lf, due_date: e.target.value })} style={formInputStyle} /></FormField>
+                    <FormField label="Priority">
+                      <select value={lf.priority} onChange={e => setLf({ ...lf, priority: e.target.value })} style={formInputStyle}>
+                        <option value="critical">Critical</option><option value="high">High</option>
+                        <option value="normal">Normal</option><option value="low">Low</option>
+                      </select>
+                    </FormField>
+                    <FormField label="Duration (min)"><input type="number" value={lf.duration_minutes} onChange={e => setLf({ ...lf, duration_minutes: e.target.value })} style={formInputStyle} placeholder="15" /></FormField>
+                  </FormGrid>
+                  <FormButtons onCancel={() => setShowLineItemForm(false)} onSave={addLineItem} saving={saving} label="Add Item" />
+                </FormWrapper>
+              )}
+
+              {lineItems.length === 0 ? (
+                <div style={{ padding: '20px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '13px' }}>No line items. Add agenda items or load a template to get started.</div>
+              ) : (
+                <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflow: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead><tr>
+                      <th style={{ ...mtgTh, width: '100px' }}>Ref</th>
+                      <th style={mtgTh}>Description</th>
+                      <th style={mtgTh}>Owner</th>
+                      <th style={mtgTh}>Due</th>
+                      <th style={mtgTh}>Priority</th>
+                      <th style={mtgTh}>Status</th>
+                      <th style={{ ...mtgTh, width: '90px' }}></th>
+                    </tr></thead>
+                    <tbody>
+                      {lineItems.map((item, i) => {
+                        const ref = buildItemRef(mtg, item.item_order)
+                        const act = item.action
+                        const owner = act ? (empMap[act.owner_employee_id] || null) : null
+                        const overdue = act?.due_date && act.status !== 'closed' && act.due_date < new Date().toISOString().slice(0, 10)
+                        const isEditing = editingItem === item.id
+
+                        return (
+                          <React.Fragment key={item.id}>
+                            <tr style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
+                              <td style={{ ...mtgTd(i), fontWeight: 600, color: BRAND.purple, whiteSpace: 'nowrap' }}>{ref}</td>
+                              <td style={{ ...mtgTd(i), maxWidth: '300px' }}>
+                                <div style={{ fontSize: '12px', fontWeight: 600, color: BRAND.coolGrey }}>{item.title}</div>
+                                {item.description && <div style={{ fontSize: '11px', color: BRAND.coolGrey, marginTop: '2px' }}>{item.description}</div>}
+                              </td>
+                              <td style={{ ...mtgTd(i), whiteSpace: 'nowrap' }}>
+                                {act ? (owner ? <EmployeeLink id={owner.id}>{owner.name}</EmployeeLink> : (act.owner_name || '—')) : <span style={{ color: '#bbb', fontSize: '11px' }}>—</span>}
+                              </td>
+                              <td style={{ ...mtgTd(i), whiteSpace: 'nowrap', color: overdue ? BRAND.red : BRAND.coolGrey }}>
+                                {act?.due_date ? formatDate(act.due_date) : '—'}
+                              </td>
+                              <td style={mtgTd(i)}>
+                                {act ? <StatusBadge status={act.priority} map={actionPriorityMap} /> : '—'}
+                              </td>
+                              <td style={mtgTd(i)}>
+                                {act ? <StatusBadge status={act.status} map={meetingActionStatusMap} /> : <span style={{ color: '#bbb', fontSize: '11px' }}>Info only</span>}
+                              </td>
+                              <td style={mtgTd(i)}>
+                                <div style={{ display: 'flex', gap: '6px' }}>
+                                  <button onClick={() => isEditing ? setEditingItem(null) : startEdit(item)} style={{ background: 'none', border: 'none', color: BRAND.purple, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '11px' }}>{isEditing ? 'Close' : 'Edit'}</button>
+                                  <button onClick={() => deleteLineItem(item)} style={{ background: 'none', border: 'none', color: BRAND.red, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '11px' }}>Remove</button>
+                                </div>
+                              </td>
+                            </tr>
+                            {/* Inline discussion notes */}
+                            <tr style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
+                              <td style={{ padding: '0 12px 8px', border: 'none' }}></td>
+                              <td colSpan={6} style={{ padding: '0 12px 8px', border: 'none', background: i % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
+                                <textarea defaultValue={item.discussion_notes || ''} onBlur={e => updateLineItemNotes(item.id, e.target.value)} rows={1} style={{ width: '100%', padding: '4px 8px', border: `1px solid ${BRAND.greyBorder}`, fontFamily: BRAND.font, fontSize: '11px', color: BRAND.coolGrey, background: BRAND.purpleLight, boxSizing: 'border-box', resize: 'vertical' }} placeholder={mtg.status === 'scheduled' ? 'Planned discussion points...' : 'Discussion notes...'} />
+                              </td>
+                            </tr>
+                            {/* Expanded edit form */}
+                            {isEditing && (
+                              <tr><td colSpan={7} style={{ padding: 0 }}>
+                                <div style={{ padding: '16px 20px', background: BRAND.purpleLight, borderTop: `1px solid ${BRAND.greyBorder}`, borderBottom: `1px solid ${BRAND.greyBorder}` }}>
+                                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                                    <div style={{ gridColumn: '1 / -1' }}><label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>Title</label><input value={editForm.title || ''} onChange={e => setEditForm({ ...editForm, title: e.target.value })} style={formInputStyle} /></div>
+                                    <div style={{ gridColumn: '1 / -1' }}><label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>Detail</label><textarea value={editForm.description || ''} onChange={e => setEditForm({ ...editForm, description: e.target.value })} rows={2} style={{ ...formInputStyle, resize: 'vertical' }} /></div>
+                                    <div>
+                                      <label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>Owner</label>
+                                      <select value={editForm.owner_employee_id || ''} onChange={e => setEditForm({ ...editForm, owner_employee_id: e.target.value })} style={formInputStyle}>
+                                        <option value="">No action / external</option>
+                                        {(employees || []).map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                                      </select>
+                                    </div>
+                                    {!editForm.owner_employee_id && <div><label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>External Owner</label><input value={editForm.owner_name || ''} onChange={e => setEditForm({ ...editForm, owner_name: e.target.value })} style={formInputStyle} /></div>}
+                                    <div><label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>Due Date</label><input type="date" value={editForm.due_date || ''} onChange={e => setEditForm({ ...editForm, due_date: e.target.value })} style={formInputStyle} /></div>
+                                    <div><label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>Priority</label>
+                                      <select value={editForm.priority || 'normal'} onChange={e => setEditForm({ ...editForm, priority: e.target.value })} style={formInputStyle}>
+                                        <option value="critical">Critical</option><option value="high">High</option>
+                                        <option value="normal">Normal</option><option value="low">Low</option>
+                                      </select>
+                                    </div>
+                                    {item.action && <div><label style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey, marginBottom: '2px' }}>Action Status</label>
+                                      <select value={editForm.action_status || 'open'} onChange={e => setEditForm({ ...editForm, action_status: e.target.value })} style={formInputStyle}>
+                                        <option value="open">Open</option><option value="in_progress">In Progress</option>
+                                        <option value="closed">Closed</option><option value="superseded">Superseded</option>
+                                      </select>
+                                    </div>}
+                                  </div>
+                                  <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                                    <button onClick={() => { setEditingItem(null); setEditForm({}) }} style={{ padding: '6px 16px', background: BRAND.white, color: BRAND.coolGrey, border: `1px solid ${BRAND.greyBorder}`, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>Cancel</button>
+                                    <button disabled={saving} onClick={() => saveItemEdits(item)} style={{ padding: '6px 16px', background: BRAND.purple, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>{saving ? 'Saving...' : 'Save'}</button>
+                                  </div>
+                                </div>
+                              </td></tr>
+                            )}
+                          </React.Fragment>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* ---- DECISIONS ---- */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontSize: '14px', color: BRAND.purple }}>Decisions</span>
+                <button onClick={() => setShowDecisionForm(!showDecisionForm)} style={{ padding: '4px 14px', background: BRAND.purple, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>{showDecisionForm ? 'Cancel' : 'Add Decision'}</button>
+              </div>
+              {showDecisionForm && (
+                <FormWrapper>
+                  <FormGrid>
+                    <FormField label="Decision" span><textarea value={df.description} onChange={e => setDf({ ...df, description: e.target.value })} rows={2} style={{ ...formInputStyle, resize: 'vertical' }} placeholder="What was decided" /></FormField>
+                    <FormField label="Agreed By"><input value={df.agreed_by} onChange={e => setDf({ ...df, agreed_by: e.target.value })} style={formInputStyle} placeholder="Names or roles" /></FormField>
+                  </FormGrid>
+                  <FormButtons onCancel={() => setShowDecisionForm(false)} onSave={addDecision} saving={saving} label="Add Decision" />
+                </FormWrapper>
+              )}
+              <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflow: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead><tr>
+                    <th style={{ ...mtgTh, width: '60px' }}>Ref</th><th style={mtgTh}>Decision</th><th style={mtgTh}>Agreed By</th><th style={{ ...mtgTh, width: '60px' }}></th>
+                  </tr></thead>
+                  <tbody>
+                    {decisions.length === 0 ? (
+                      <tr><td colSpan={4} style={{ padding: '20px', color: BRAND.coolGrey, fontSize: '13px' }}>No decisions recorded.</td></tr>
+                    ) : decisions.map((d, i) => (
+                      <tr key={d.id} style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
+                        <td style={{ ...mtgTd(i), fontWeight: 600, color: BRAND.purple }}>{d.decision_ref}</td>
+                        <td style={mtgTd(i)}>{d.description}</td>
+                        <td style={mtgTd(i)}>{d.agreed_by || '—'}</td>
+                        <td style={mtgTd(i)}><button onClick={() => deleteDecision(d.id)} style={{ background: 'none', border: 'none', color: BRAND.red, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '11px' }}>Remove</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* General notes + next meeting */}
+            {mtg.notes && (
+              <div style={{ marginBottom: '16px' }}>
+                <span style={{ fontSize: '14px', color: BRAND.purple, display: 'block', marginBottom: '8px' }}>General Notes</span>
+                <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, padding: '16px', fontSize: '13px', color: BRAND.coolGrey, lineHeight: '1.5', whiteSpace: 'pre-wrap' }}>{mtg.notes}</div>
+              </div>
+            )}
+            {mtg.next_meeting_date && (
+              <div style={{ fontSize: '13px', color: BRAND.coolGrey }}>Next meeting: {formatDate(mtg.next_meeting_date)}</div>
+            )}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // =====================================================================
+  // MEETINGS LIST VIEW
+  // =====================================================================
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
         <span style={{ fontSize: '15px', color: BRAND.purple }}>{meetings.length} meeting{meetings.length !== 1 ? 's' : ''}</span>
-        {!showForm && <AddButton label="Add Meeting" onClick={() => setShowForm(true)} />}
+        {!showForm && <AddButton label="Schedule Meeting" onClick={() => setShowForm(true)} />}
       </div>
 
       {showForm && (
         <FormWrapper>
-          <span style={{ fontSize: '14px', color: BRAND.purple, display: 'block', marginBottom: '16px' }}>New Meeting</span>
+          <span style={{ fontSize: '14px', color: BRAND.purple, display: 'block', marginBottom: '4px' }}>Schedule Meeting</span>
+          <span style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'block', marginBottom: '16px' }}>Create a meeting, then build the agenda from the detail view. You can also load a template.</span>
           <FormMessage msg={msg} />
-          <FormGrid>
+          <FormGrid cols={3}>
             <FormField label="Title" span><input value={f.title} onChange={e => setF({ ...f, title: e.target.value })} style={formInputStyle} placeholder="Meeting title" /></FormField>
             <FormField label="Date"><input type="date" value={f.meeting_date} onChange={e => setF({ ...f, meeting_date: e.target.value })} style={formInputStyle} /></FormField>
-            <FormField label="Type"><select value={f.meeting_type} onChange={e => setF({ ...f, meeting_type: e.target.value })} style={formInputStyle}><option value="progress">Progress</option><option value="kick_off">Kick Off</option><option value="review">Review</option><option value="workshop">Workshop</option><option value="site_visit">Site Visit</option><option value="close_out">Close Out</option><option value="introduction">Introduction</option><option value="proposal">Proposal</option><option value="pitch">Pitch</option><option value="negotiation">Negotiation</option></select></FormField>
+            <FormField label="Start Time"><input type="time" value={f.start_time} onChange={e => setF({ ...f, start_time: e.target.value })} style={formInputStyle} /></FormField>
+            <FormField label="End Time"><input type="time" value={f.end_time} onChange={e => setF({ ...f, end_time: e.target.value })} style={formInputStyle} /></FormField>
+            <FormField label="Type">
+              <select value={f.meeting_type} onChange={e => setF({ ...f, meeting_type: e.target.value })} style={formInputStyle}>
+                <option value="project">Project</option><option value="client">Client</option><option value="internal">Internal</option>
+                <option value="governance">Governance</option><option value="kickoff">Kick Off</option><option value="standard">Standard</option>
+                <option value="review">Review</option><option value="escalation">Escalation</option><option value="ad_hoc">Ad Hoc</option>
+                <option value="introduction">Introduction</option><option value="proposal">Proposal</option><option value="pitch">Pitch</option>
+                <option value="negotiation">Negotiation</option><option value="site_visit">Site Visit</option><option value="other">Other</option>
+              </select>
+            </FormField>
             <FormField label="Location"><input value={f.location} onChange={e => setF({ ...f, location: e.target.value })} style={formInputStyle} placeholder="e.g. TSMC Phoenix Office" /></FormField>
-            <FormField label="Client Sentiment"><select value={f.client_sentiment} onChange={e => setF({ ...f, client_sentiment: e.target.value })} style={formInputStyle}><option value="">Not recorded</option><option value="very_satisfied">Very Satisfied</option><option value="satisfied">Satisfied</option><option value="neutral">Neutral</option><option value="concerned">Concerned</option><option value="dissatisfied">Dissatisfied</option></select></FormField>
+            <FormField label="Client Sentiment">
+              <select value={f.client_sentiment} onChange={e => setF({ ...f, client_sentiment: e.target.value })} style={formInputStyle}>
+                <option value="">Not recorded</option><option value="very_satisfied">Very Satisfied</option><option value="satisfied">Satisfied</option>
+                <option value="neutral">Neutral</option><option value="concerned">Concerned</option><option value="dissatisfied">Dissatisfied</option>
+              </select>
+            </FormField>
+            <FormField label="Next Meeting"><input type="date" value={f.next_meeting_date} onChange={e => setF({ ...f, next_meeting_date: e.target.value })} style={formInputStyle} /></FormField>
             <FormField label="Notes" span><textarea value={f.notes} onChange={e => setF({ ...f, notes: e.target.value })} rows={3} style={{ ...formInputStyle, resize: 'vertical' }} placeholder="Meeting notes..." /></FormField>
           </FormGrid>
-          <FormButtons onCancel={() => { setShowForm(false); setMsg(null) }} onSave={handleAdd} saving={saving} label="Add Meeting" />
+          <FormButtons onCancel={() => { setShowForm(false); setMsg(null) }} onSave={handleAdd} saving={saving} label="Schedule Meeting" />
         </FormWrapper>
       )}
 
       {meetings.length === 0 ? (
         <div style={{ padding: '24px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '14px' }}>No meetings recorded for this project.</div>
       ) : (
-        meetings.map(m => (
-          <div key={m.id} style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '8px', overflow: 'hidden' }}>
-            <button onClick={() => setExpanded(expanded === m.id ? null : m.id)} style={{
-              width: '100%', padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-              background: 'none', border: 'none', cursor: 'pointer', fontFamily: BRAND.font, textAlign: 'left',
-            }}>
-              <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                <span style={{ color: BRAND.coolGrey, fontSize: '13px', minWidth: '90px' }}>{formatDate(m.meeting_date)}</span>
-                <span style={{ color: BRAND.purple, fontSize: '14px' }}>{m.title || m.meeting_number}</span>
-                <span style={{ color: BRAND.coolGrey, fontSize: '12px', textTransform: 'capitalize' }}>{(m.meeting_type || '').replace(/_/g, ' ')}</span>
-              </div>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                {m.client_sentiment && <StatusBadge status={m.client_sentiment} map={sentimentMap} />}
-                <span style={{ color: BRAND.coolGrey, fontSize: '12px' }}>{expanded === m.id ? '▲' : '▼'}</span>
-              </div>
-            </button>
-            {expanded === m.id && (
-              <div style={{ padding: '0 20px 16px', borderTop: `1px solid ${BRAND.greyBorder}` }}>
-                {m.description && <div style={{ padding: '12px 0 4px', fontSize: '13px', color: BRAND.coolGrey }}>{m.description}</div>}
-                {m.notes && <div style={{ padding: '8px 0', fontSize: '13px', color: BRAND.coolGrey, lineHeight: '1.5' }}>{m.notes}</div>}
-                <div style={{ display: 'flex', gap: '24px', fontSize: '12px', color: BRAND.coolGrey, paddingTop: '8px' }}>
-                  {m.location && <span>Location: {m.location}</span>}
-                  {m.next_meeting_date && <span>Next: {formatDate(m.next_meeting_date)}</span>}
-                </div>
-              </div>
-            )}
-          </div>
-        ))
+        <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflow: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+            <thead><tr>
+              {['Ref', 'Date', 'Title', 'Type', 'Status', 'Minutes', 'Sentiment', ''].map(h => (
+                <th key={h} style={{ background: BRAND.purple, color: BRAND.white, padding: '10px 14px', textAlign: 'left', fontWeight: 400, whiteSpace: 'nowrap', fontSize: '13px' }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {meetings.map((m, i) => (
+                <tr key={m.id} style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight, cursor: 'pointer' }} onClick={() => openMeeting(m.id)}>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.purple, fontWeight: 600 }}>{m.meeting_number}</td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, whiteSpace: 'nowrap' }}>{formatDate(m.meeting_date)}</td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.purple, textDecoration: 'underline', textDecorationColor: 'rgba(74,21,75,0.3)' }}>{m.title}</td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, textTransform: 'capitalize' }}>{(m.meeting_type || '').replace(/_/g, ' ')}</td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}` }}><StatusBadge status={m.status} map={meetingStatusMap} /></td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}` }}><StatusBadge status={m.minutes_status} map={minutesStatusMap} /></td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}` }}>{m.client_sentiment ? <StatusBadge status={m.client_sentiment} map={sentimentMap} /> : '—'}</td>
+                  <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: m.status === 'scheduled' ? BRAND.blue : BRAND.purple, fontSize: '12px', fontWeight: 600 }}>{m.status === 'scheduled' ? 'Build Agenda' : 'View Minutes'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
@@ -875,6 +1587,7 @@ function SavingsTab({ savings, projectId, employees, onReload }) {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
   const [f, setF] = useState({ saving_date: new Date().toISOString().slice(0, 10), title: '', saving_type: 'tangible', category: 'cost_avoidance', amount: '', calculation_basis: '', beneficiary: '', description: '' })
+  const [expandedId, setExpandedId] = useState(null)
 
   const tangible = savings.filter(s => s.saving_type === 'tangible')
   const intangible = savings.filter(s => s.saving_type === 'intangible')
@@ -888,11 +1601,86 @@ function SavingsTab({ savings, projectId, employees, onReload }) {
       saving_date: f.saving_date || null, title: f.title.trim(), saving_type: f.saving_type,
       category: f.category, amount: f.saving_type === 'tangible' && f.amount ? parseFloat(f.amount) : null,
       calculation_basis: f.calculation_basis.trim() || null, beneficiary: f.beneficiary.trim() || null,
-      description: f.description.trim() || null,
+      description: f.description.trim() || null, verified: false,
     })
     if (error) { setMsg({ type: 'error', text: error.message }) }
     else { setF({ saving_date: new Date().toISOString().slice(0, 10), title: '', saving_type: 'tangible', category: 'cost_avoidance', amount: '', calculation_basis: '', beneficiary: '', description: '' }); setShowForm(false); onReload() }
     setSaving(false)
+  }
+
+  async function handleVerifyTransition(savingId, currentVerified) {
+    // verified = true means approved/locked; false means draft
+    // Toggling to verified locks the record
+    const updates = { verified: !currentVerified }
+    if (!currentVerified) {
+      updates.verified_date = new Date().toISOString().slice(0, 10)
+    } else {
+      updates.verified_date = null
+    }
+    await supabase.from('project_savings').update(updates).eq('id', savingId)
+    onReload()
+  }
+
+  const savingsBadge = (verified) => ({
+    bg: verified ? '#E8F5E8' : BRAND.greyLight,
+    text: verified ? BRAND.green : BRAND.coolGrey,
+    label: verified ? 'Verified (Locked)' : 'Pending Verification',
+  })
+
+  function renderSavingsTable(data, showAmount = true) {
+    if (data.length === 0) return <div style={{ padding: '20px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '13px' }}>No records.</div>
+    return data.map((s, idx) => {
+      const locked = s.verified
+      const expanded = expandedId === s.id
+      return (
+        <div key={s.id} style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '4px' }}>
+          <button onClick={() => setExpandedId(expanded ? null : s.id)} style={{ width: '100%', padding: '10px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'none', border: 'none', cursor: 'pointer', fontFamily: BRAND.font, textAlign: 'left' }}>
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+              {locked && <span style={{ fontSize: '12px', color: BRAND.coolGrey }}>LOCKED</span>}
+              <span style={{ color: BRAND.coolGrey, fontSize: '12px' }}>{formatDate(s.saving_date)}</span>
+              <span style={{ color: BRAND.purple, fontSize: '13px' }}>{s.title}</span>
+              {showAmount && s.amount && <span style={{ color: BRAND.green, fontSize: '13px' }}>{formatCurrency(s.amount)}</span>}
+            </div>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <span style={{ padding: '2px 10px', fontSize: '11px', background: savingsBadge(s.verified).bg, color: savingsBadge(s.verified).text, fontFamily: BRAND.font }}>{savingsBadge(s.verified).label}</span>
+              <span style={{ color: BRAND.coolGrey, fontSize: '12px' }}>{expanded ? 'Collapse' : 'Expand'}</span>
+            </div>
+          </button>
+          {expanded && (
+            <div style={{ padding: '0 20px 16px', borderTop: `1px solid ${BRAND.greyBorder}` }}>
+              {/* Approval banner */}
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '10px 16px', marginBottom: '12px', marginTop: '8px',
+                background: savingsBadge(s.verified).bg,
+                borderLeft: `4px solid ${savingsBadge(s.verified).text}`,
+              }}>
+                <span style={{ fontSize: '13px', color: savingsBadge(s.verified).text, fontWeight: 600, fontFamily: BRAND.font }}>{savingsBadge(s.verified).label}</span>
+                <button onClick={() => handleVerifyTransition(s.id, s.verified)} style={{
+                  padding: '6px 16px', background: s.verified ? BRAND.amber : BRAND.green, color: BRAND.white,
+                  border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px',
+                }}>
+                  {s.verified ? 'Unlock for Changes' : 'Verify and Lock'}
+                </button>
+              </div>
+              {locked && (
+                <div style={{ padding: '6px 16px', background: BRAND.greyLight, fontSize: '12px', color: BRAND.coolGrey, fontFamily: BRAND.font, marginBottom: '12px' }}>
+                  This saving is verified and locked. Click "Unlock for Changes" to edit.
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', fontSize: '12px', color: BRAND.coolGrey }}>
+                <div><span style={{ display: 'block', fontSize: '11px' }}>Category</span><span style={{ textTransform: 'capitalize' }}>{(s.category || '').replace(/_/g, ' ')}</span></div>
+                {showAmount && <div><span style={{ display: 'block', fontSize: '11px' }}>Amount</span>{s.amount ? formatCurrency(s.amount) : '—'}</div>}
+                {s.calculation_basis && <div><span style={{ display: 'block', fontSize: '11px' }}>Calculation Basis</span>{s.calculation_basis}</div>}
+                {s.beneficiary && <div><span style={{ display: 'block', fontSize: '11px' }}>Beneficiary</span>{s.beneficiary}</div>}
+                {s.description && <div style={{ gridColumn: '1 / -1' }}><span style={{ display: 'block', fontSize: '11px' }}>Description</span>{s.description}</div>}
+                {s.verified_date && <div><span style={{ display: 'block', fontSize: '11px' }}>Verified Date</span>{formatDate(s.verified_date)}</div>}
+              </div>
+            </div>
+          )}
+        </div>
+      )
+    })
   }
 
   return (
@@ -918,39 +1706,21 @@ function SavingsTab({ savings, projectId, employees, onReload }) {
             <FormField label="Title" span><input value={f.title} onChange={e => setF({ ...f, title: e.target.value })} style={formInputStyle} placeholder="Saving title" /></FormField>
             <FormField label="Date"><input type="date" value={f.saving_date} onChange={e => setF({ ...f, saving_date: e.target.value })} style={formInputStyle} /></FormField>
             <FormField label="Type"><select value={f.saving_type} onChange={e => setF({ ...f, saving_type: e.target.value })} style={formInputStyle}><option value="tangible">Tangible</option><option value="intangible">Intangible</option></select></FormField>
-            <FormField label="Category"><select value={f.category} onChange={e => setF({ ...f, category: e.target.value })} style={formInputStyle}><option value="cost_avoidance">Cost Avoidance</option><option value="cost_reduction">Cost Reduction</option><option value="schedule_improvement">Schedule Improvement</option><option value="quality_improvement">Quality Improvement</option><option value="risk_mitigation">Risk Mitigation</option><option value="process_improvement">Process Improvement</option></select></FormField>
+            <FormField label="Category"><select value={f.category} onChange={e => setF({ ...f, category: e.target.value })} style={formInputStyle}><option value="cost_avoidance">Cost Avoidance</option><option value="compliance">Compliance</option><option value="efficiency">Efficiency</option><option value="risk_reduction">Risk Reduction</option><option value="quality">Quality</option><option value="relationship">Relationship</option><option value="knowledge">Knowledge</option><option value="other">Other</option></select></FormField>
             {f.saving_type === 'tangible' && <FormField label="Amount ($)"><input type="number" value={f.amount} onChange={e => setF({ ...f, amount: e.target.value })} style={formInputStyle} placeholder="0.00" /></FormField>}
             {f.saving_type === 'tangible' && <FormField label="Calculation Basis"><input value={f.calculation_basis} onChange={e => setF({ ...f, calculation_basis: e.target.value })} style={formInputStyle} placeholder="How was this calculated?" /></FormField>}
-            <FormField label="Beneficiary"><input value={f.beneficiary} onChange={e => setF({ ...f, beneficiary: e.target.value })} style={formInputStyle} placeholder="e.g. TSMC" /></FormField>
-            <FormField label="Description"><input value={f.description} onChange={e => setF({ ...f, description: e.target.value })} style={formInputStyle} placeholder="Brief description..." /></FormField>
+            <FormField label="Beneficiary"><input value={f.beneficiary} onChange={e => setF({ ...f, beneficiary: e.target.value })} style={formInputStyle} placeholder="e.g. Client name" /></FormField>
+            <FormField label="Description" span><textarea value={f.description} onChange={e => setF({ ...f, description: e.target.value })} rows={2} style={{ ...formInputStyle, resize: 'vertical' }} placeholder="Brief description..." /></FormField>
           </FormGrid>
           <FormButtons onCancel={() => { setShowForm(false); setMsg(null) }} onSave={handleAdd} saving={saving} label="Add Saving" />
         </FormWrapper>
       )}
 
       <span style={{ fontSize: '15px', color: BRAND.purple, display: 'block', marginBottom: '12px' }}>Tangible Savings</span>
-      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '24px' }}>
-        <DataTable columns={[
-          { header: 'Date', render: r => formatDate(r.saving_date), nowrap: true },
-          { header: 'Title', accessor: 'title' },
-          { header: 'Category', render: r => <span style={{ textTransform: 'capitalize' }}>{(r.category || '').replace(/_/g, ' ')}</span> },
-          { header: 'Amount', render: r => formatCurrency(r.amount), nowrap: true },
-          { header: 'Basis', accessor: 'calculation_basis' },
-          { header: 'Verified', render: r => r.verified ? 'Yes' : 'No' },
-          { header: 'Beneficiary', accessor: 'beneficiary' },
-        ]} data={tangible} emptyMessage="No tangible savings recorded." />
-      </div>
+      {renderSavingsTable(tangible, true)}
 
-      <span style={{ fontSize: '15px', color: BRAND.purple, display: 'block', marginBottom: '12px' }}>Intangible Savings</span>
-      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}` }}>
-        <DataTable columns={[
-          { header: 'Date', render: r => formatDate(r.saving_date), nowrap: true },
-          { header: 'Title', accessor: 'title' },
-          { header: 'Category', render: r => <span style={{ textTransform: 'capitalize' }}>{(r.category || '').replace(/_/g, ' ')}</span> },
-          { header: 'Description', accessor: 'description' },
-          { header: 'Beneficiary', accessor: 'beneficiary' },
-        ]} data={intangible} emptyMessage="No intangible savings recorded." />
-      </div>
+      <span style={{ fontSize: '15px', color: BRAND.purple, display: 'block', marginBottom: '12px', marginTop: '24px' }}>Intangible Savings</span>
+      {renderSavingsTable(intangible, false)}
     </>
   )
 }
@@ -962,7 +1732,8 @@ function VariationsTab({ variations, projectId, employees, onReload }) {
   const [showForm, setShowForm] = useState(false)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
-  const [f, setF] = useState({ variation_ref: '', title: '', variation_type: 'scope_change', variation_amount: '', status: 'draft', raised_by: '', raised_date: new Date().toISOString().slice(0, 10), description: '' })
+  const [f, setF] = useState({ variation_ref: '', title: '', variation_type: 'scope_change', variation_amount: '', raised_by: '', raised_date: new Date().toISOString().slice(0, 10), description: '' })
+  const [expandedId, setExpandedId] = useState(null)
 
   const approved = variations.filter(v => v.status === 'approved')
   const totalVariationValue = approved.reduce((t, v) => t + Number(v.variation_amount || 0), 0)
@@ -975,19 +1746,41 @@ function VariationsTab({ variations, projectId, employees, onReload }) {
       sector_id: PCS_SECTOR_ID, project_id: projectId,
       variation_ref: f.variation_ref.trim(), title: f.title.trim(), variation_type: f.variation_type,
       variation_amount: f.variation_amount ? parseFloat(f.variation_amount) : null,
-      status: f.status, raised_by: f.raised_by.trim() || null,
+      status: 'draft', raised_by: f.raised_by || null,
       raised_date: f.raised_date || null, description: f.description.trim() || null,
     })
     if (error) { setMsg({ type: 'error', text: error.message }) }
-    else { setF({ variation_ref: '', title: '', variation_type: 'scope_change', variation_amount: '', status: 'draft', raised_by: '', raised_date: new Date().toISOString().slice(0, 10), description: '' }); setShowForm(false); onReload() }
+    else { setF({ variation_ref: '', title: '', variation_type: 'scope_change', variation_amount: '', raised_by: '', raised_date: new Date().toISOString().slice(0, 10), description: '' }); setShowForm(false); onReload() }
     setSaving(false)
+  }
+
+  async function handleApprovalTransition(variationId, newStatus, notes) {
+    const updates = { status: newStatus }
+    if (newStatus === 'approved') {
+      updates.approved_by = 'Sector Manager'
+      updates.approved_date = new Date().toISOString().slice(0, 10)
+    }
+    if (newStatus === 'submitted') {
+      updates.submitted_date = new Date().toISOString().slice(0, 10)
+    }
+    if (newStatus === 'rejected' && notes) {
+      updates.rejected_reason = notes
+    }
+    // pending_change → back to draft so PM can edit
+    if (newStatus === 'pending_change') {
+      updates.status = 'draft'
+      updates.approved_by = null
+      updates.approved_date = null
+    }
+    await supabase.from('project_variations').update(updates).eq('id', variationId)
+    onReload()
   }
 
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', flex: 1, marginRight: '16px' }}>
-          <KPICard label="Total Variations" value={variations.length} />
+          <KPICard label="Total Change Orders" value={variations.length} />
           <KPICard label="Approved" value={approved.length} color={BRAND.green} />
           <KPICard label="Pending" value={variations.filter(v => ['draft', 'submitted', 'under_review'].includes(v.status)).length} color={BRAND.amber} />
           <KPICard label="Net Approved Value" value={formatCurrency(totalVariationValue)} color={totalVariationValue >= 0 ? BRAND.green : BRAND.red} />
@@ -1007,28 +1800,61 @@ function VariationsTab({ variations, projectId, employees, onReload }) {
             <FormField label="Title"><input value={f.title} onChange={e => setF({ ...f, title: e.target.value })} style={formInputStyle} placeholder="Change order title" /></FormField>
             <FormField label="Type"><select value={f.variation_type} onChange={e => setF({ ...f, variation_type: e.target.value })} style={formInputStyle}><option value="scope_change">Scope Change</option><option value="fee_variation">Fee Variation</option><option value="contract_amendment">Contract Amendment</option><option value="schedule_change">Schedule Change</option><option value="resource_change">Resource Change</option></select></FormField>
             <FormField label="Amount ($)"><input type="number" value={f.variation_amount} onChange={e => setF({ ...f, variation_amount: e.target.value })} style={formInputStyle} placeholder="0.00" /></FormField>
-            <FormField label="Status"><select value={f.status} onChange={e => setF({ ...f, status: e.target.value })} style={formInputStyle}><option value="draft">Draft</option><option value="submitted">Submitted</option><option value="under_review">Under Review</option><option value="approved">Approved</option><option value="rejected">Rejected</option></select></FormField>
-            <FormField label="Raised By"><select value={f.raised_by} onChange={e => setF({ ...f, raised_by: e.target.value })} style={formInputStyle}><option value="">Select...</option>{employees.map(emp => <option key={emp.id} value={emp.name}>{emp.name}</option>)}</select></FormField>
+            <FormField label="Raised By">
+              <select value={f.raised_by} onChange={e => setF({ ...f, raised_by: e.target.value })} style={formInputStyle}>
+                <option value="">Select...</option>
+                {employees.map(emp => <option key={emp.id} value={emp.name}>{emp.name}</option>)}
+              </select>
+            </FormField>
             <FormField label="Raised Date"><input type="date" value={f.raised_date} onChange={e => setF({ ...f, raised_date: e.target.value })} style={formInputStyle} /></FormField>
-            <FormField label="Description"><input value={f.description} onChange={e => setF({ ...f, description: e.target.value })} style={formInputStyle} placeholder="Brief description..." /></FormField>
+            <FormField label="Description" span><textarea value={f.description} onChange={e => setF({ ...f, description: e.target.value })} rows={2} style={{ ...formInputStyle, resize: 'vertical' }} placeholder="Brief description..." /></FormField>
           </FormGrid>
           <FormButtons onCancel={() => { setShowForm(false); setMsg(null) }} onSave={handleAdd} saving={saving} label="Add Change Order" />
         </FormWrapper>
       )}
 
-      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}` }}>
-        <DataTable columns={[
-          { header: 'Ref', accessor: 'variation_ref', nowrap: true },
-          { header: 'Title', accessor: 'title' },
-          { header: 'Type', render: r => <span style={{ textTransform: 'capitalize' }}>{(r.variation_type || '').replace(/_/g, ' ')}</span> },
-          { header: 'Amount', render: r => r.variation_amount ? formatCurrency(r.variation_amount) : '—', nowrap: true },
-          { header: 'Revised Value', render: r => r.revised_value ? formatCurrency(r.revised_value) : '—', nowrap: true },
-          { header: 'Status', render: r => <StatusBadge status={r.status} map={variationStatusMap} /> },
-          { header: 'Raised', render: r => formatDate(r.raised_date), nowrap: true },
-          { header: 'Raised By', accessor: 'raised_by' },
-          { header: 'Client Ref', accessor: 'client_reference' },
-        ]} data={variations} emptyMessage="No variations recorded for this project." />
-      </div>
+      {variations.length === 0 ? (
+        <div style={{ padding: '24px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '13px' }}>No change orders recorded for this project.</div>
+      ) : variations.map((v, idx) => {
+        const locked = v.status === 'approved'
+        const expanded = expandedId === v.id
+        return (
+          <div key={v.id} style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '8px' }}>
+            <button onClick={() => setExpandedId(expanded ? null : v.id)} style={{ width: '100%', padding: '12px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'none', border: 'none', cursor: 'pointer', fontFamily: BRAND.font, textAlign: 'left' }}>
+              <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+                {locked && <span style={{ fontSize: '12px', color: BRAND.coolGrey }}>LOCKED</span>}
+                <span style={{ color: BRAND.purple, fontWeight: 600, fontSize: '13px' }}>{v.variation_ref}</span>
+                <span style={{ color: BRAND.coolGrey, fontSize: '13px' }}>{v.title}</span>
+                {v.variation_amount && <span style={{ color: BRAND.purple, fontSize: '13px' }}>{formatCurrency(v.variation_amount)}</span>}
+              </div>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <StatusBadge status={v.status} map={variationStatusMap} />
+                <span style={{ color: BRAND.coolGrey, fontSize: '12px' }}>{expanded ? 'Collapse' : 'Expand'}</span>
+              </div>
+            </button>
+            {expanded && (
+              <div style={{ padding: '0 20px 16px', borderTop: `1px solid ${BRAND.greyBorder}` }}>
+                <ApprovalBanner
+                  status={v.status}
+                  onTransition={(newStatus, notes) => handleApprovalTransition(v.id, newStatus, notes)}
+                  entityLabel="Change Order"
+                  approvedBy={v.approved_by}
+                  approvedDate={v.approved_date}
+                  rejectionReason={v.rejected_reason}
+                />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', fontSize: '12px', color: BRAND.coolGrey }}>
+                  <div><span style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey }}>Type</span><span style={{ textTransform: 'capitalize' }}>{(v.variation_type || '').replace(/_/g, ' ')}</span></div>
+                  <div><span style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey }}>Raised By</span>{v.raised_by || '—'}</div>
+                  <div><span style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey }}>Raised Date</span>{v.raised_date ? formatDate(v.raised_date) : '—'}</div>
+                  {v.description && <div style={{ gridColumn: '1 / -1' }}><span style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey }}>Description</span>{v.description}</div>}
+                  {v.approved_by && <div><span style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey }}>Approved By</span>{v.approved_by}</div>}
+                  {v.approved_date && <div><span style={{ display: 'block', fontSize: '11px', color: BRAND.coolGrey }}>Approved Date</span>{formatDate(v.approved_date)}</div>}
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })}
     </>
   )
 }

@@ -4,6 +4,8 @@ import { formatCurrency, formatCurrencyExact, formatDate } from '../lib/utils'
 import { supabase } from '../lib/supabase'
 import { PCS_SECTOR_ID } from '../hooks/useData'
 import { SectionHeader, LoadingState, KPICard, DataTable, StatusBadge } from '../components/SharedUI'
+import AccountActionPlanSection from '../components/AccountActionPlanSection'
+import QualityPlanSection from '../components/QualityPlanSection'
 
 const woStatusMap = {
   active: { bg: '#E8F5E8', text: BRAND.green, label: 'Active' },
@@ -31,22 +33,31 @@ export default function ClientProfilePage({ clientId, onBack }) {
   // Rate line form
   const [showRLForm, setShowRLForm] = useState(null) // work_order_id or null
   const [rlForm, setRLForm] = useState({ label: '', bill_rate: '' })
+  const [accountPlans, setAccountPlans] = useState([])
+  const [accountPlanActions, setAccountPlanActions] = useState([])
+  const [qualityItems, setQualityItems] = useState([])
 
   useEffect(() => { loadAll() }, [clientId])
 
   async function loadAll() {
     setLoading(true)
-    const [clientRes, woRes, invRes, projRes] = await Promise.all([
+    const [clientRes, woRes, invRes, projRes, acctPlansRes, acctActionsRes, qualityRes] = await Promise.all([
       supabase.from('clients').select('*').eq('id', clientId).single(),
       supabase.from('work_orders').select('*').eq('client_id', clientId).order('created_at', { ascending: true }),
       supabase.from('invoices').select('*').eq('client_id', clientId).eq('sector_id', PCS_SECTOR_ID).order('billing_month', { ascending: false }),
       supabase.from('projects').select('*').eq('client_id', clientId).order('code', { ascending: true }),
+      supabase.from('account_action_plans').select('*').eq('sector_id', PCS_SECTOR_ID).eq('client_id', clientId),
+      supabase.from('account_actions').select('*').eq('sector_id', PCS_SECTOR_ID),
+      supabase.from('quality_plan_items').select('*').eq('sector_id', PCS_SECTOR_ID).eq('client_id', clientId).order('sort_order'),
     ])
 
     if (clientRes.data) { setClient(clientRes.data); setClientForm(clientRes.data) }
     setWorkOrders(woRes.data || [])
     setInvoices(invRes.data || [])
     setProjects(projRes.data || [])
+    setAccountPlans(acctPlansRes.data || [])
+    setAccountPlanActions(acctActionsRes.data || [])
+    setQualityItems(qualityRes.data || [])
 
     // Load rate lines for all work orders
     const woIds = (woRes.data || []).map(w => w.id)
@@ -390,6 +401,29 @@ export default function ClientProfilePage({ clientId, onBack }) {
           </div>
         </div>
       )}
+
+      {/* Account Action Plans */}
+      <div style={{ marginTop: '32px' }}>
+        <div style={{ fontSize: '16px', color: BRAND.purple, marginBottom: '16px' }}>Account Action Plans</div>
+        <AccountActionPlanSection
+          plans={accountPlans} planActions={accountPlanActions}
+          projects={projects.map(p => ({ id: p.id, code: p.code, name: p.name }))}
+          projectMap={Object.fromEntries(projects.map(p => [p.id, { id: p.id, code: p.code, name: p.name }]))}
+          clientId={clientId} clientName={client?.name || ''}
+          onReload={loadAll} mode="client"
+        />
+      </div>
+
+      {/* Quality Plan */}
+      <div style={{ marginTop: '32px' }}>
+        <div style={{ fontSize: '16px', color: BRAND.purple, marginBottom: '16px' }}>Quality Plan</div>
+        <QualityPlanSection
+          items={qualityItems} clientId={clientId}
+          projects={projects.map(p => ({ id: p.id, code: p.code, name: p.name }))}
+          projectMap={Object.fromEntries(projects.map(p => [p.id, { id: p.id, code: p.code, name: p.name }]))}
+          onReload={loadAll} mode="client"
+        />
+      </div>
     </div>
   )
 }

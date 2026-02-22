@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { BRAND } from '../lib/brand'
 import { formatCurrencyExact, formatCurrency, formatDate } from '../lib/utils'
 import { supabase } from '../lib/supabase'
+import { auditDelete, getDeletionLog } from '../lib/auditDelete'
 import { PCS_SECTOR_ID, useEmployees, useClients, useProjects } from '../hooks/useData'
 import { SectionHeader, LoadingState, DataTable, StatusBadge, EmployeeLink, ProjectLink, ClientLink } from '../components/SharedUI'
 
@@ -11,6 +12,8 @@ const TABS = [
   { key: 'projects', label: 'Projects' },
   { key: 'workorders', label: 'Work Orders' },
   { key: 'ratelines', label: 'Rate Lines' },
+  { key: 'templates', label: 'Meeting Templates' },
+  { key: 'deletions', label: 'Deletion Log' },
   { key: 'roles', label: 'Roles & Access' },
 ]
 
@@ -37,6 +40,8 @@ export default function SettingsPage() {
       {tab === 'projects' && <ProjectsTab />}
       {tab === 'workorders' && <WorkOrdersTab />}
       {tab === 'ratelines' && <RateLinesTab />}
+      {tab === 'templates' && <MeetingTemplatesTab />}
+      {tab === 'deletions' && <DeletionLogTab />}
       {tab === 'roles' && <RolesTab />}
     </div>
   )
@@ -122,7 +127,7 @@ function EmployeesTab() {
             <div><label style={labelStyle}>Full Name</label><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required style={inputStyle} /></div>
             <div><label style={labelStyle}>Role</label><input value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} required placeholder="e.g. Field Monitor" style={inputStyle} /></div>
             <div><label style={labelStyle}>Hourly Cost ($)</label><input type="number" step="0.01" value={form.hourly_cost} onChange={e => setForm({ ...form, hourly_cost: e.target.value })} required style={inputStyle} /></div>
-            <div><label style={labelStyle}>Target Utilisation (0-1)</label><input type="number" step="0.01" min="0" max="1" value={form.target_utilization} onChange={e => setForm({ ...form, target_utilization: e.target.value })} required style={inputStyle} /></div>
+            <div><label style={labelStyle}>Target Utilization (0-1)</label><input type="number" step="0.01" min="0" max="1" value={form.target_utilization} onChange={e => setForm({ ...form, target_utilization: e.target.value })} required style={inputStyle} /></div>
             <div><label style={labelStyle}>Start Date</label><input type="date" value={form.start_date} onChange={e => setForm({ ...form, start_date: e.target.value })} style={inputStyle} /></div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingTop: '20px' }}>
               <input type="checkbox" checked={form.is_cross_charge} onChange={e => setForm({ ...form, is_cross_charge: e.target.checked })} id="xc" />
@@ -537,6 +542,193 @@ function RolesTab() {
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+// ============================================================================
+// Meeting Templates Tab
+// ============================================================================
+function MeetingTemplatesTab() {
+  const [templates, setTemplates] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState(null)
+  const [name, setName] = useState('')
+  const [items, setItems] = useState([''])
+  const [editId, setEditId] = useState(null)
+
+  useEffect(() => { loadTemplates() }, [])
+
+  async function loadTemplates() {
+    setLoading(true)
+    const { data } = await supabase.from('app_settings')
+      .select('*').eq('sector_id', PCS_SECTOR_ID).like('setting_key', 'meeting_template_%')
+      .order('created_at')
+    const parsed = (data || []).map(d => {
+      try { return { id: d.id, key: d.setting_key, ...JSON.parse(d.setting_value) } }
+      catch { return null }
+    }).filter(Boolean)
+    setTemplates(parsed)
+    setLoading(false)
+  }
+
+  function addItem() { setItems([...items, '']) }
+  function removeItem(i) { setItems(items.filter((_, idx) => idx !== i)) }
+  function updateItem(i, val) { const n = [...items]; n[i] = val; setItems(n) }
+
+  async function handleSave() {
+    const trimmedName = name.trim()
+    const trimmedItems = items.map(i => i.trim()).filter(Boolean)
+    if (!trimmedName) { setMsg({ type: 'error', text: 'Template name is required.' }); return }
+    if (trimmedItems.length === 0) { setMsg({ type: 'error', text: 'At least one agenda item is required.' }); return }
+    setSaving(true); setMsg(null)
+
+    const key = editId
+      ? templates.find(t => t.id === editId)?.key
+      : `meeting_template_${Date.now()}`
+    const value = JSON.stringify({ name: trimmedName, items: trimmedItems })
+
+    if (editId) {
+      const { error } = await supabase.from('app_settings').update({ setting_value: value, updated_at: new Date().toISOString() }).eq('id', editId)
+      if (error) { setMsg({ type: 'error', text: error.message }); setSaving(false); return }
+    } else {
+      const { error } = await supabase.from('app_settings').insert({ sector_id: PCS_SECTOR_ID, setting_key: key, setting_value: value })
+      if (error) { setMsg({ type: 'error', text: error.message }); setSaving(false); return }
+    }
+    setName(''); setItems(['']); setShowForm(false); setEditId(null); setSaving(false); loadTemplates()
+  }
+
+  function startEdit(t) {
+    setEditId(t.id); setName(t.name); setItems(t.items.length > 0 ? [...t.items] : ['']); setShowForm(true)
+  }
+
+  async function handleDelete(id) {
+    await auditDelete('app_settings', id)
+    loadTemplates()
+  }
+
+  if (loading) return <div style={{ padding: '20px', color: BRAND.coolGrey, fontSize: '13px' }}>Loading templates...</div>
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <span style={{ fontSize: '15px', color: BRAND.purple }}>Meeting Templates ({templates.length})</span>
+        {!showForm && <button onClick={() => { setShowForm(true); setEditId(null); setName(''); setItems(['']) }} style={btnStyle}>Add Template</button>}
+      </div>
+
+      <div style={{ fontSize: '12px', color: BRAND.coolGrey, marginBottom: '16px' }}>
+        Templates provide standard agenda items that can be loaded into any new meeting. Create sector-wide templates here, or project-specific templates from the Meeting Minutes tab.
+      </div>
+
+      {showForm && (
+        <div style={{ background: BRAND.purpleLight, border: `1px solid ${BRAND.greyBorder}`, padding: '20px', marginBottom: '20px' }}>
+          <span style={{ fontSize: '14px', color: BRAND.purple, display: 'block', marginBottom: '16px' }}>{editId ? 'Edit Template' : 'New Template'}</span>
+          <Message msg={msg} />
+          <div style={{ marginBottom: '12px' }}>
+            <label style={labelStyle}>Template Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} style={inputStyle} placeholder="e.g. Monthly Progress Review" />
+          </div>
+          <label style={labelStyle}>Agenda Items</label>
+          {items.map((item, i) => (
+            <div key={i} style={{ display: 'flex', gap: '8px', marginBottom: '6px' }}>
+              <span style={{ minWidth: '30px', color: BRAND.coolGrey, fontSize: '13px', paddingTop: '8px' }}>{i + 1}.</span>
+              <input value={item} onChange={e => updateItem(i, e.target.value)} style={{ ...inputStyle, flex: 1 }} placeholder="Agenda item title" />
+              {items.length > 1 && (
+                <button onClick={() => removeItem(i)} style={{ background: 'none', border: 'none', color: BRAND.red, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px', padding: '8px' }}>Remove</button>
+              )}
+            </div>
+          ))}
+          <button onClick={addItem} style={{ background: 'none', border: 'none', color: BRAND.purple, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px', padding: '4px 0', marginBottom: '16px' }}>+ Add another item</button>
+          <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+            <button onClick={() => { setShowForm(false); setEditId(null); setMsg(null) }} style={{ padding: '8px 20px', background: BRAND.white, color: BRAND.coolGrey, border: `1px solid ${BRAND.greyBorder}`, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px' }}>Cancel</button>
+            <button onClick={handleSave} disabled={saving} style={btnStyle}>{saving ? 'Saving...' : editId ? 'Update Template' : 'Save Template'}</button>
+          </div>
+        </div>
+      )}
+
+      {templates.length === 0 ? (
+        <div style={{ padding: '24px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '13px' }}>No meeting templates created yet.</div>
+      ) : templates.map((t, idx) => (
+        <div key={t.id} style={{ background: idx % 2 === 0 ? BRAND.white : BRAND.greyLight, border: `1px solid ${BRAND.greyBorder}`, marginBottom: '4px', padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ fontSize: '14px', color: BRAND.purple, marginBottom: '4px' }}>{t.name}</div>
+            <div style={{ fontSize: '12px', color: BRAND.coolGrey }}>
+              {t.items.map((item, i) => <span key={i}>{i + 1}. {item}{i < t.items.length - 1 ? '  |  ' : ''}</span>)}
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+            <button onClick={() => startEdit(t)} style={{ background: 'none', border: 'none', color: BRAND.purple, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>Edit</button>
+            <button onClick={() => handleDelete(t.id)} style={{ background: 'none', border: 'none', color: BRAND.red, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '12px' }}>Delete</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ============================================================================
+// Deletion Log Tab
+// ============================================================================
+function DeletionLogTab() {
+  const [entries, setEntries] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [expandedId, setExpandedId] = useState(null)
+
+  useEffect(() => {
+    getDeletionLog(100).then(data => { setEntries(data); setLoading(false) })
+  }, [])
+
+  if (loading) return <div style={{ padding: '20px', color: BRAND.coolGrey, fontSize: '13px' }}>Loading deletion log...</div>
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+        <span style={{ fontSize: '15px', color: BRAND.purple }}>Deletion Log ({entries.length} entries)</span>
+      </div>
+      <div style={{ fontSize: '12px', color: BRAND.coolGrey, marginBottom: '16px' }}>
+        Every deleted record is logged here with a snapshot of the data at the time of deletion.
+      </div>
+
+      {entries.length === 0 ? (
+        <div style={{ padding: '24px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '13px' }}>No deletions recorded.</div>
+      ) : (
+        <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflow: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr>
+                {['When', 'Table', 'Deleted By', 'Record Summary', ''].map(h => (
+                  <th key={h} style={{ background: BRAND.purple, color: BRAND.white, padding: '10px 14px', textAlign: 'left', fontWeight: 400, fontSize: '13px', whiteSpace: 'nowrap' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e, i) => {
+                const snap = e.snapshot || {}
+                const summary = snap.title || snap.name || snap.description || snap.external_name || snap.decision_ref || snap.action_ref || snap.variation_ref || JSON.stringify(snap).slice(0, 80)
+                const expanded = expandedId === e.id
+                return (
+                  <>
+                    <tr key={e.id} style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight, cursor: 'pointer' }} onClick={() => setExpandedId(expanded ? null : e.id)}>
+                      <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '12px', whiteSpace: 'nowrap' }}>{e.deleted_at ? new Date(e.deleted_at).toLocaleString() : '—'}</td>
+                      <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.purple, fontSize: '12px' }}>{e.table}</td>
+                      <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '12px' }}>{e.deleted_by || '—'}</td>
+                      <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.coolGrey, fontSize: '12px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</td>
+                      <td style={{ padding: '10px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: BRAND.purple, fontSize: '12px' }}>{expanded ? 'Collapse' : 'Details'}</td>
+                    </tr>
+                    {expanded && (
+                      <tr key={`${e.id}-detail`}><td colSpan={5} style={{ padding: '16px 20px', background: BRAND.purpleLight, borderBottom: `1px solid ${BRAND.greyBorder}` }}>
+                        <pre style={{ fontFamily: 'monospace', fontSize: '11px', color: BRAND.coolGrey, whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0 }}>{JSON.stringify(snap, null, 2)}</pre>
+                      </td></tr>
+                    )}
+                  </>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }

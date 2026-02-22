@@ -3,7 +3,8 @@ import { BRAND } from '../lib/brand'
 import { formatCurrency, formatCurrencyExact, formatDate, formatPct } from '../lib/utils'
 import { supabase } from '../lib/supabase'
 import { PCS_SECTOR_ID } from '../hooks/useData'
-import { SectionHeader, LoadingState, KPICard, DataTable, StatusBadge } from '../components/SharedUI'
+import { SectionHeader, LoadingState, KPICard, DataTable, StatusBadge, ClientLink, ProjectLink } from '../components/SharedUI'
+import OpportunityProfilePage from './OpportunityProfilePage'
 
 const PROB_PRESETS = [
   { key: 'committed', label: 'Committed', weight: 1.00 },
@@ -27,8 +28,24 @@ const statusMap = {
   lost: { bg: '#FDECEC', text: BRAND.red, label: 'Lost' },
 }
 
+const PURSUIT_STAGES = [
+  { key: 'identified', label: 'Identified', color: BRAND.coolGrey },
+  { key: 'qualifying', label: 'Qualifying', color: BRAND.amber },
+  { key: 'proposal_prep', label: 'Proposal Prep', color: BRAND.blue },
+  { key: 'proposal_submitted', label: 'Submitted', color: BRAND.teal },
+  { key: 'negotiation', label: 'Negotiation', color: BRAND.purple },
+  { key: 'awaiting_decision', label: 'Awaiting Decision', color: BRAND.amber },
+  { key: 'won', label: 'Won', color: BRAND.green },
+  { key: 'lost', label: 'Lost', color: BRAND.red },
+]
+
+const pursuitStageMap = Object.fromEntries(
+  PURSUIT_STAGES.map(s => [s.key, { bg: s.color + '1A', text: s.color, label: s.label }])
+)
+
 const TABS = [
   { key: 'pipeline', label: 'Pipeline' },
+  { key: 'crosssell', label: 'Cross-Sell' },
   { key: 'scenarios', label: 'Scenarios' },
   { key: 'budget', label: 'Budget Forecast' },
 ]
@@ -48,7 +65,12 @@ export default function ForecastPlannerPage() {
   const [rateLines, setRateLines] = useState([])
   const [sector, setSector] = useState(null)
   const [clients, setClients] = useState([])
+  const [crossSells, setCrossSells] = useState([])
+  const [projects, setProjects] = useState([])
   const [loading, setLoading] = useState(true)
+  const [selectedOpportunity, setSelectedOpportunity] = useState(null)
+  const [resourceAllocations, setResourceAllocations] = useState([])
+  const [employees, setEmployees] = useState([])
 
   // Custom probability overrides (in-memory, keyed by forecast id)
   const [customProbs, setCustomProbs] = useState({})
@@ -56,7 +78,7 @@ export default function ForecastPlannerPage() {
   useEffect(() => { loadAll() }, [])
 
   async function loadAll() {
-    const [fRes, faRes, invRes, pwhRes, rlRes, secRes, clRes] = await Promise.all([
+    const [fRes, faRes, invRes, pwhRes, rlRes, secRes, clRes, csRes, prRes, raRes, empRes] = await Promise.all([
       supabase.from('forecasts').select('*').eq('sector_id', PCS_SECTOR_ID).order('created_at'),
       supabase.from('forecast_allocations').select('*').eq('sector_id', PCS_SECTOR_ID),
       supabase.from('invoices').select('*').eq('sector_id', PCS_SECTOR_ID),
@@ -64,6 +86,10 @@ export default function ForecastPlannerPage() {
       supabase.from('work_order_rate_lines').select('*').eq('sector_id', PCS_SECTOR_ID),
       supabase.from('sectors').select('*').eq('id', PCS_SECTOR_ID).single(),
       supabase.from('clients').select('*').eq('sector_id', PCS_SECTOR_ID),
+      supabase.from('cross_sell_opportunities').select('*').eq('sector_id', PCS_SECTOR_ID).order('created_at', { ascending: false }),
+      supabase.from('projects').select('id, code, name').eq('sector_id', PCS_SECTOR_ID).order('code'),
+      supabase.from('resource_allocations').select('*').eq('sector_id', PCS_SECTOR_ID),
+      supabase.from('employees').select('id, name, hourly_cost, target_utilization').eq('sector_id', PCS_SECTOR_ID),
     ])
     setForecasts(fRes.data || [])
     setAllocations(faRes.data || [])
@@ -72,6 +98,10 @@ export default function ForecastPlannerPage() {
     setRateLines(rlRes.data || [])
     setSector(secRes.data)
     setClients(clRes.data || [])
+    setCrossSells(csRes.data || [])
+    setProjects(prRes.data || [])
+    setResourceAllocations(raRes.data || [])
+    setEmployees(empRes.data || [])
     setLoading(false)
   }
 
@@ -138,7 +168,56 @@ export default function ForecastPlannerPage() {
     return byMonth
   }, [invoices])
 
+  // Resource allocation revenue by month (from confirmed allocations)
+  const resourceAllocRevByMonth = useMemo(() => {
+    const rlMap = {}
+    rateLines.forEach(rl => { rlMap[rl.id] = Number(rl.bill_rate) })
+    const defaultRate = rateLines.find(rl => rl.is_default)
+    const fallbackRate = defaultRate ? Number(defaultRate.bill_rate) : 159.65
+
+    const byMonth = {}
+    resourceAllocations.forEach(ra => {
+      const m = ra.month?.slice(0, 7)
+      if (!m) return
+      byMonth[m] = (byMonth[m] || 0) + Number(ra.planned_hours) * fallbackRate
+    })
+    return byMonth
+  }, [resourceAllocations, rateLines])
+
+  // Cost by month (from resource allocations x employee hourly cost)
+  const costByMonth = useMemo(() => {
+    const empCostMap = {}
+    employees.forEach(e => { empCostMap[e.id] = Number(e.hourly_cost || 0) })
+    const byMonth = {}
+    resourceAllocations.forEach(ra => {
+      const m = ra.month?.slice(0, 7)
+      if (!m) return
+      const cost = empCostMap[ra.employee_id] || 0
+      byMonth[m] = (byMonth[m] || 0) + Number(ra.planned_hours) * cost
+    })
+    return byMonth
+  }, [resourceAllocations, employees])
+
+  // Total cost from planned weekly hours (actual staff cost)
+  const actualCostByMonth = useMemo(() => {
+    const empCostMap = {}
+    employees.forEach(e => { empCostMap[e.id] = Number(e.hourly_cost || 0) })
+    const byMonth = {}
+    weeklyHours.forEach(h => {
+      const m = h.week_ending?.slice(0, 7)
+      if (!m) return
+      const cost = empCostMap[h.employee_id] || 0
+      byMonth[m] = (byMonth[m] || 0) + Number(h.planned_hours) * cost
+    })
+    return byMonth
+  }, [weeklyHours, employees])
+
   if (loading) return <LoadingState message="Loading forecast planner..." />
+
+  // Opportunity drill-down
+  if (selectedOpportunity) {
+    return <OpportunityProfilePage forecastId={selectedOpportunity} onBack={() => { setSelectedOpportunity(null); loadAll() }} />
+  }
 
   const inputStyle = {
     width: '100%', padding: '8px 12px', border: `1px solid ${BRAND.greyBorder}`,
@@ -168,7 +247,12 @@ export default function ForecastPlannerPage() {
           customProbs={customProbs} setCustomProbs={setCustomProbs}
           getProb={getProb} clients={clients} loadAll={loadAll}
           inputStyle={inputStyle} labelStyle={labelStyle}
+          onOpenOpportunity={setSelectedOpportunity}
         />
+      )}
+      {tab === 'crosssell' && (
+        <CrossSellTab crossSells={crossSells} clients={clients} projects={projects}
+          loadAll={loadAll} inputStyle={inputStyle} labelStyle={labelStyle} />
       )}
       {tab === 'scenarios' && (
         <ScenariosTab
@@ -176,6 +260,7 @@ export default function ForecastPlannerPage() {
           forecastMonthlyRev={forecastMonthlyRev} actualMonthlyRev={actualMonthlyRev}
           invoicedByMonth={invoicedByMonth} getProb={getProb}
           budgetTarget={budgetTarget} monthlyTarget={monthlyTarget}
+          actualCostByMonth={actualCostByMonth}
         />
       )}
       {tab === 'budget' && (
@@ -184,6 +269,9 @@ export default function ForecastPlannerPage() {
           forecastMonthlyRev={forecastMonthlyRev} actualMonthlyRev={actualMonthlyRev}
           invoicedByMonth={invoicedByMonth} getProb={getProb}
           budgetTarget={budgetTarget} monthlyTarget={monthlyTarget}
+          customProbs={customProbs}
+          resourceAllocRevByMonth={resourceAllocRevByMonth}
+          costByMonth={costByMonth} actualCostByMonth={actualCostByMonth}
         />
       )}
     </div>
@@ -193,7 +281,7 @@ export default function ForecastPlannerPage() {
 // ============================================================================
 // PIPELINE TAB
 // ============================================================================
-function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, getProb, clients, loadAll, inputStyle, labelStyle }) {
+function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, getProb, clients, loadAll, inputStyle, labelStyle, onOpenOpportunity }) {
   const [showForm, setShowForm] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
@@ -202,6 +290,9 @@ function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, 
     probability: 'medium', start_date: '2026-01-01', end_date: '2026-12-31',
     proposed_client_id: '', description: '', monthly_hours: '',
   })
+
+  const clientMap = {}
+  clients.forEach(c => { clientMap[c.id] = c.name })
 
   const active = forecasts.filter(f => f.status !== 'lost' && f.status !== 'won')
   const won = forecasts.filter(f => f.status === 'won')
@@ -313,7 +404,7 @@ function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, 
       <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
           <thead><tr>
-            {['Name','Type','Client','Bill Rate','Gross Revenue','Probability','Custom %','Weighted Revenue','Status'].map(h => (
+            {['Name','Type','Client','Bill Rate','Gross Revenue','Probability','Custom %','Weighted Revenue','Stage','Status'].map(h => (
               <th key={h} style={{ background: BRAND.purple, color: BRAND.white, padding: '10px 12px', textAlign: 'left', fontWeight: 400, whiteSpace: 'nowrap' }}>{h}</th>
             ))}
           </tr></thead>
@@ -324,9 +415,15 @@ function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, 
               const weighted = rev.grossRev * prob
               return (
                 <tr key={f.id} style={{ background: i % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
-                  <td style={{ padding: '8px 12px', color: BRAND.purple, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{f.name}</td>
+                  <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BRAND.greyBorder}` }}>
+                    <button onClick={() => onOpenOpportunity(f.id)} style={{
+                      background: 'none', border: 'none', color: BRAND.purple, cursor: 'pointer',
+                      fontFamily: BRAND.font, fontSize: 'inherit', padding: 0, textAlign: 'left',
+                      textDecoration: 'underline', textDecorationColor: 'rgba(74,21,75,0.3)',
+                    }}>{f.name}</button>
+                  </td>
                   <td style={{ padding: '8px 12px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}`, fontSize: '12px' }}>{f.forecast_type === 'new_project' ? 'New' : 'CO'}</td>
-                  <td style={{ padding: '8px 12px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{f.proposed_client_id ? '—' : '—'}</td>
+                  <td style={{ padding: '8px 12px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{clientMap[f.proposed_client_id] || '—'}</td>
                   <td style={{ padding: '8px 12px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{formatCurrencyExact(f.bill_rate)}</td>
                   <td style={{ padding: '8px 12px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{formatCurrency(rev.grossRev)}</td>
                   <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BRAND.greyBorder}` }}><StatusBadge status={f.probability} map={probMap} /></td>
@@ -342,6 +439,7 @@ function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, 
                     />
                   </td>
                   <td style={{ padding: '8px 12px', color: BRAND.teal, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{formatCurrency(weighted)}</td>
+                  <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BRAND.greyBorder}` }}><StatusBadge status={f.pursuit_stage || 'identified'} map={pursuitStageMap} /></td>
                   <td style={{ padding: '8px 12px', borderBottom: `1px solid ${BRAND.greyBorder}` }}><StatusBadge status={f.status} map={statusMap} /></td>
                 </tr>
               )
@@ -356,7 +454,7 @@ function PipelineTab({ forecasts, forecastRevenue, customProbs, setCustomProbs, 
 // ============================================================================
 // SCENARIOS TAB
 // ============================================================================
-function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMonthlyRev, invoicedByMonth, getProb, budgetTarget, monthlyTarget }) {
+function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMonthlyRev, invoicedByMonth, getProb, budgetTarget, monthlyTarget, actualCostByMonth }) {
   // Monthly breakdown: actual (from hours grid) + weighted pipeline
   const monthlyData = useMemo(() => {
     return MONTHS_2026.map((m, idx) => {
@@ -387,6 +485,8 @@ function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMo
         invoiced,
         target: monthlyTarget,
         gap: expectedTotal - monthlyTarget,
+        cost: actualCostByMonth[m] || 0,
+        margin: expectedTotal - (actualCostByMonth[m] || 0),
       }
     })
   }, [forecasts, forecastMonthlyRev, actualMonthlyRev, invoicedByMonth, getProb, monthlyTarget])
@@ -438,7 +538,7 @@ function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMo
       <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, overflowX: 'auto' }}>
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
           <thead><tr>
-            {['Month','Confirmed','Pipeline (wtd)','Expected Total','Target','Gap','Invoiced'].map(h => (
+            {['Month','Confirmed','Pipeline (wtd)','Expected Total','Target','Gap','Cost','Margin','Invoiced'].map(h => (
               <th key={h} style={{ background: BRAND.purple, color: BRAND.white, padding: '10px 14px', textAlign: 'left', fontWeight: 400, whiteSpace: 'nowrap' }}>{h}</th>
             ))}
           </tr></thead>
@@ -451,6 +551,8 @@ function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMo
                 <td style={{ padding: '8px 14px', color: BRAND.purple, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{formatCurrency(row.expected)}</td>
                 <td style={{ padding: '8px 14px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{formatCurrency(row.target)}</td>
                 <td style={{ padding: '8px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: row.gap >= 0 ? BRAND.green : BRAND.red }}>{formatCurrency(row.gap)}</td>
+                <td style={{ padding: '8px 14px', color: BRAND.amber, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{row.cost > 0 ? formatCurrency(row.cost) : '—'}</td>
+                <td style={{ padding: '8px 14px', borderBottom: `1px solid ${BRAND.greyBorder}`, color: row.margin >= 0 ? BRAND.green : BRAND.red }}>{row.expected > 0 || row.cost > 0 ? formatCurrency(row.margin) : '—'}</td>
                 <td style={{ padding: '8px 14px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{row.invoiced > 0 ? formatCurrency(row.invoiced) : '—'}</td>
               </tr>
             ))}
@@ -461,6 +563,8 @@ function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMo
               <td style={{ padding: '8px 14px', color: BRAND.purple }}>{formatCurrency(totalExpected)}</td>
               <td style={{ padding: '8px 14px', color: BRAND.coolGrey }}>{formatCurrency(budgetTarget)}</td>
               <td style={{ padding: '8px 14px', color: gapToBudget >= 0 ? BRAND.green : BRAND.red }}>{formatCurrency(gapToBudget)}</td>
+              <td style={{ padding: '8px 14px', color: BRAND.amber }}>{formatCurrency(monthlyData.reduce((s, m) => s + m.cost, 0))}</td>
+              <td style={{ padding: '8px 14px', color: (totalExpected - monthlyData.reduce((s, m) => s + m.cost, 0)) >= 0 ? BRAND.green : BRAND.red }}>{formatCurrency(totalExpected - monthlyData.reduce((s, m) => s + m.cost, 0))}</td>
               <td style={{ padding: '8px 14px', color: BRAND.coolGrey }}>{formatCurrency(totalInvoiced)}</td>
             </tr>
           </tbody>
@@ -473,13 +577,16 @@ function ScenariosTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMo
 // ============================================================================
 // BUDGET FORECAST TAB
 // ============================================================================
-function BudgetForecastTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMonthlyRev, invoicedByMonth, getProb, budgetTarget, monthlyTarget }) {
+function BudgetForecastTab({ forecasts, forecastRevenue, forecastMonthlyRev, actualMonthlyRev, invoicedByMonth, getProb, budgetTarget, monthlyTarget, customProbs, resourceAllocRevByMonth, costByMonth, actualCostByMonth }) {
   const now = new Date()
   const currentMonth = now.getMonth() // 0-indexed
 
   // Split: YTD actual + remaining months forecast
   const ytdActual = MONTHS_2026.slice(0, currentMonth).reduce((s, m) => s + (actualMonthlyRev[m] || 0), 0)
   const ytdInvoiced = MONTHS_2026.slice(0, currentMonth).reduce((s, m) => s + (invoicedByMonth[m] || 0), 0)
+  const ytdCost = MONTHS_2026.slice(0, currentMonth).reduce((s, m) => s + (actualCostByMonth[m] || 0), 0)
+  const ytdMargin = ytdActual - ytdCost
+  const ytdMarginPct = ytdActual > 0 ? ytdMargin / ytdActual : 0
 
   // Remaining months: confirmed work + weighted pipeline
   let remainingConfirmed = 0
@@ -524,6 +631,8 @@ function BudgetForecastTab({ forecasts, forecastRevenue, forecastMonthlyRev, act
         <KPICard label="Budget Target" value={formatCurrency(budgetTarget)} />
         <KPICard label="YTD Revenue" value={formatCurrency(ytdActual)} color={BRAND.green} subValue={`${currentMonth} months`} />
         <KPICard label="YTD Invoiced" value={formatCurrency(ytdInvoiced)} color={BRAND.teal} />
+        <KPICard label="YTD Cost" value={formatCurrency(ytdCost)} color={BRAND.amber} subValue="Staff cost" />
+        <KPICard label="YTD Margin" value={formatCurrency(ytdMargin)} color={ytdMargin >= 0 ? BRAND.green : BRAND.red} subValue={ytdActual > 0 ? `${(ytdMarginPct * 100).toFixed(1)}%` : '--'} />
         <KPICard label="Remaining (Confirmed)" value={formatCurrency(remainingConfirmed)} color={BRAND.blue} subValue={`${remainingMonths} months`} />
         <KPICard label="Remaining (Pipeline)" value={formatCurrency(remainingPipeline)} color={BRAND.amber} subValue="Weighted" />
       </div>
@@ -613,6 +722,334 @@ function BudgetForecastTab({ forecasts, forecastRevenue, forecastMonthlyRev, act
           </tbody>
         </table>
       </div>
+
+      {/* Margin Analysis */}
+      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, padding: '24px', marginTop: '24px' }}>
+        <div style={{ fontSize: '14px', color: BRAND.purple, marginBottom: '12px' }}>Margin Analysis (from Resource Allocations)</div>
+        <div style={{ fontSize: '13px', color: BRAND.coolGrey, marginBottom: '16px' }}>
+          Compares planned revenue against staff costs based on resource allocations and employee hourly rates.
+        </div>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+          <thead><tr>
+            {['Month', 'Planned Revenue', 'Staff Cost', 'Margin', 'Margin %'].map(h => (
+              <th key={h} style={{ background: BRAND.purple, color: BRAND.white, padding: '8px 12px', textAlign: 'left', fontWeight: 400 }}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {MONTHS_2026.map((m, idx) => {
+              const rev = resourceAllocRevByMonth[m] || actualMonthlyRev[m] || 0
+              const cost = costByMonth[m] || actualCostByMonth[m] || 0
+              const margin = rev - cost
+              const marginPct = rev > 0 ? (margin / rev) * 100 : 0
+              return (
+                <tr key={m} style={{ background: idx % 2 === 0 ? BRAND.white : BRAND.greyLight }}>
+                  <td style={{ padding: '8px 12px', color: BRAND.coolGrey, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{MONTH_LABELS[idx]} 2026</td>
+                  <td style={{ padding: '8px 12px', color: BRAND.teal, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{rev > 0 ? formatCurrency(rev) : '—'}</td>
+                  <td style={{ padding: '8px 12px', color: BRAND.amber, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{cost > 0 ? formatCurrency(cost) : '—'}</td>
+                  <td style={{ padding: '8px 12px', color: margin >= 0 ? BRAND.green : BRAND.red, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{rev > 0 || cost > 0 ? formatCurrency(margin) : '—'}</td>
+                  <td style={{ padding: '8px 12px', color: marginPct >= 30 ? BRAND.green : marginPct >= 15 ? BRAND.amber : BRAND.red, borderBottom: `1px solid ${BRAND.greyBorder}` }}>{rev > 0 ? marginPct.toFixed(1) + '%' : '—'}</td>
+                </tr>
+              )
+            })}
+            {(() => {
+              const totalRev = MONTHS_2026.reduce((s, m) => s + (resourceAllocRevByMonth[m] || actualMonthlyRev[m] || 0), 0)
+              const totalCost = MONTHS_2026.reduce((s, m) => s + (costByMonth[m] || actualCostByMonth[m] || 0), 0)
+              const totalMargin = totalRev - totalCost
+              const totalMarginPct = totalRev > 0 ? (totalMargin / totalRev) * 100 : 0
+              return (
+                <tr style={{ borderTop: `2px solid ${BRAND.purple}` }}>
+                  <td style={{ padding: '8px 12px', color: BRAND.purple, fontWeight: 500 }}>Total</td>
+                  <td style={{ padding: '8px 12px', color: BRAND.teal, fontWeight: 500 }}>{formatCurrency(totalRev)}</td>
+                  <td style={{ padding: '8px 12px', color: BRAND.amber, fontWeight: 500 }}>{formatCurrency(totalCost)}</td>
+                  <td style={{ padding: '8px 12px', color: totalMargin >= 0 ? BRAND.green : BRAND.red, fontWeight: 500 }}>{formatCurrency(totalMargin)}</td>
+                  <td style={{ padding: '8px 12px', color: totalMarginPct >= 30 ? BRAND.green : totalMarginPct >= 15 ? BRAND.amber : BRAND.red, fontWeight: 500 }}>{totalMarginPct.toFixed(1)}%</td>
+                </tr>
+              )
+            })()}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+
+// ============================================================================
+// CROSS-SELL TAB — Rich detail with activities, next actions, contacts
+// ============================================================================
+function CrossSellTab({ crossSells, clients, projects, loadAll, inputStyle, labelStyle }) {
+  const [showForm, setShowForm] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [expandedId, setExpandedId] = useState(null)
+  const [filterStage, setFilterStage] = useState('active')
+  const [form, setForm] = useState({
+    title: '', client_id: '', source_project_id: '', target_service: '', target_sector: '',
+    estimated_value: '', probability: 'medium', assigned_to_name: '', description: '',
+  })
+
+  // Next action form (inline per opportunity)
+  const [showNextAction, setShowNextAction] = useState(null)
+  const [nextActionForm, setNextActionForm] = useState({ action: '', due_date: '', owner: '' })
+
+  const clientMap = {}
+  clients.forEach(c => { clientMap[c.id] = c.name })
+  const projectMap = {}
+  projects.forEach(p => { projectMap[p.id] = p })
+
+  const filtered = useMemo(() => {
+    if (filterStage === 'active') return crossSells.filter(cs => !['won', 'lost', 'parked'].includes(cs.pursuit_stage))
+    if (filterStage === 'all') return crossSells
+    return crossSells.filter(cs => cs.pursuit_stage === filterStage)
+  }, [crossSells, filterStage])
+
+  const totalActive = crossSells.filter(cs => !['won', 'lost', 'parked'].includes(cs.pursuit_stage)).length
+  const totalValue = crossSells.filter(cs => !['won', 'lost', 'parked'].includes(cs.pursuit_stage))
+    .reduce((s, cs) => s + (Number(cs.estimated_value) || 0), 0)
+  const weightedValue = crossSells.filter(cs => !['won', 'lost', 'parked'].includes(cs.pursuit_stage))
+    .reduce((s, cs) => s + (Number(cs.estimated_value) || 0) * Number(cs.probability_weight), 0)
+  const wonValue = crossSells.filter(cs => cs.pursuit_stage === 'won')
+    .reduce((s, cs) => s + (Number(cs.estimated_value) || 0), 0)
+  const wonCount = crossSells.filter(cs => cs.pursuit_stage === 'won').length
+
+  // Stage funnel counts
+  const stageCounts = useMemo(() => {
+    const counts = {}
+    crossSells.forEach(cs => { counts[cs.pursuit_stage] = (counts[cs.pursuit_stage] || 0) + 1 })
+    return counts
+  }, [crossSells])
+
+  async function handleAdd(e) {
+    e.preventDefault(); setSaving(true)
+    const { error } = await supabase.from('cross_sell_opportunities').insert({
+      sector_id: PCS_SECTOR_ID, title: form.title, client_id: form.client_id,
+      source_project_id: form.source_project_id || null, target_service: form.target_service,
+      target_sector: form.target_sector, estimated_value: form.estimated_value ? parseFloat(form.estimated_value) : null,
+      probability: form.probability, assigned_to_name: form.assigned_to_name || null,
+      description: form.description || null,
+    })
+    if (!error) {
+      setForm({ title: '', client_id: '', source_project_id: '', target_service: '', target_sector: '',
+        estimated_value: '', probability: 'medium', assigned_to_name: '', description: '' })
+      setShowForm(false); loadAll()
+    }
+    setSaving(false)
+  }
+
+  async function updateStage(id, newStage) {
+    const updates = { pursuit_stage: newStage }
+    if (newStage === 'won') updates.won_date = new Date().toISOString().slice(0, 10)
+    await supabase.from('cross_sell_opportunities').update(updates).eq('id', id)
+    loadAll()
+  }
+
+  async function updateNotes(id, notes) {
+    await supabase.from('cross_sell_opportunities').update({ notes }).eq('id', id)
+    loadAll()
+  }
+
+  const pursuitStages = [
+    { key: 'identified', label: 'Identified' }, { key: 'qualifying', label: 'Qualifying' },
+    { key: 'introduced', label: 'Introduced' }, { key: 'proposal_prep', label: 'Proposal Prep' },
+    { key: 'proposal_submitted', label: 'Submitted' }, { key: 'negotiation', label: 'Negotiation' },
+  ]
+
+  const selectStyle = {
+    padding: '6px 10px', border: `1px solid ${BRAND.greyBorder}`,
+    fontFamily: BRAND.font, fontSize: '13px', color: BRAND.coolGrey, background: BRAND.white,
+  }
+
+  const stageProbMap = {
+    committed: { bg: '#E8F5E8', text: BRAND.green, label: 'Committed' },
+    high: { bg: '#E8F4FD', text: BRAND.blue, label: 'High' },
+    medium: { bg: '#FFF4E5', text: BRAND.amber, label: 'Medium' },
+    low: { bg: '#FDECEC', text: BRAND.red, label: 'Low' },
+  }
+
+  return (
+    <div>
+      {/* KPIs */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: '12px', marginBottom: '24px' }}>
+        <KPICard label="Active Opportunities" value={totalActive} />
+        <KPICard label="Total Pipeline" value={formatCurrency(totalValue)} color={BRAND.teal} />
+        <KPICard label="Weighted Value" value={formatCurrency(weightedValue)} color={BRAND.purple} />
+        <KPICard label="Won" value={wonCount} color={BRAND.green} subValue={formatCurrency(wonValue)} />
+      </div>
+
+      {/* Stage funnel */}
+      <div style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}`, padding: '16px 20px', marginBottom: '24px' }}>
+        <div style={{ fontSize: '13px', color: BRAND.coolGrey, marginBottom: '12px' }}>Pursuit Stage Funnel</div>
+        <div style={{ display: 'flex', gap: '4px', alignItems: 'flex-end' }}>
+          {pursuitStages.map((s, i) => {
+            const count = stageCounts[s.key] || 0
+            const maxCount = Math.max(...pursuitStages.map(st => stageCounts[st.key] || 0), 1)
+            const height = Math.max((count / maxCount) * 60, 4)
+            return (
+              <div key={s.key} style={{ flex: 1, textAlign: 'center' }}>
+                <div style={{ fontSize: '16px', color: count > 0 ? BRAND.purple : BRAND.coolGrey, marginBottom: '4px' }}>{count}</div>
+                <div style={{ height: `${height}px`, background: count > 0 ? BRAND.purple : BRAND.greyLight, marginBottom: '6px' }} />
+                <div style={{ fontSize: '10px', color: BRAND.coolGrey }}>{s.label}</div>
+              </div>
+            )
+          })}
+          <div style={{ flex: 1, textAlign: 'center' }}>
+            <div style={{ fontSize: '16px', color: wonCount > 0 ? BRAND.green : BRAND.coolGrey, marginBottom: '4px' }}>{wonCount}</div>
+            <div style={{ height: `${Math.max((wonCount / Math.max(...pursuitStages.map(st => stageCounts[st.key] || 0), 1)) * 60, 4)}px`, background: wonCount > 0 ? BRAND.green : BRAND.greyLight, marginBottom: '6px' }} />
+            <div style={{ fontSize: '10px', color: BRAND.coolGrey }}>Won</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Controls */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
+        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+          <div>
+            <label style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'block', marginBottom: '4px' }}>Filter</label>
+            <select value={filterStage} onChange={e => setFilterStage(e.target.value)} style={selectStyle}>
+              <option value="active">Active</option><option value="all">All</option>
+              <option value="won">Won</option><option value="lost">Lost</option><option value="parked">Parked</option>
+            </select>
+          </div>
+          <span style={{ fontSize: '12px', color: BRAND.coolGrey, alignSelf: 'flex-end' }}>
+            {filtered.length} of {crossSells.length} opportunities
+          </span>
+        </div>
+        <button onClick={() => setShowForm(!showForm)} style={{
+          padding: '8px 20px', background: BRAND.purple, color: BRAND.white,
+          border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px',
+        }}>{showForm ? 'Cancel' : 'Add Opportunity'}</button>
+      </div>
+
+      {/* Add form */}
+      {showForm && (
+        <form onSubmit={handleAdd} style={{ background: BRAND.purpleLight, border: `1px solid ${BRAND.greyBorder}`, padding: '20px', marginBottom: '16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+            <div><label style={labelStyle}>Title</label><input value={form.title} onChange={e => setForm({ ...form, title: e.target.value })} required style={inputStyle} /></div>
+            <div><label style={labelStyle}>Client</label>
+              <select value={form.client_id} onChange={e => setForm({ ...form, client_id: e.target.value })} required style={inputStyle}>
+                <option value="">Select client...</option>
+                {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div><label style={labelStyle}>Source Project</label>
+              <select value={form.source_project_id} onChange={e => setForm({ ...form, source_project_id: e.target.value })} style={inputStyle}>
+                <option value="">None</option>
+                {projects.map(p => <option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
+              </select>
+            </div>
+            <div><label style={labelStyle}>Target Service</label><input value={form.target_service} onChange={e => setForm({ ...form, target_service: e.target.value })} required style={inputStyle} placeholder="e.g. Project Controls" /></div>
+            <div><label style={labelStyle}>Target Sector</label><input value={form.target_sector} onChange={e => setForm({ ...form, target_sector: e.target.value })} required style={inputStyle} placeholder="e.g. Infrastructure" /></div>
+            <div><label style={labelStyle}>Estimated Value</label><input type="number" step="0.01" value={form.estimated_value} onChange={e => setForm({ ...form, estimated_value: e.target.value })} style={inputStyle} /></div>
+            <div><label style={labelStyle}>Probability</label>
+              <select value={form.probability} onChange={e => setForm({ ...form, probability: e.target.value })} style={inputStyle}>
+                <option value="committed">Committed (100%)</option><option value="high">High (75%)</option>
+                <option value="medium">Medium (50%)</option><option value="low">Low (25%)</option>
+              </select>
+            </div>
+            <div><label style={labelStyle}>Owner</label><input value={form.assigned_to_name} onChange={e => setForm({ ...form, assigned_to_name: e.target.value })} style={inputStyle} /></div>
+            <div><label style={labelStyle}>Description</label><input value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} style={inputStyle} /></div>
+          </div>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button type="button" onClick={() => setShowForm(false)} style={{ padding: '8px 20px', background: BRAND.white, color: BRAND.coolGrey, border: `1px solid ${BRAND.greyBorder}`, cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px' }}>Cancel</button>
+            <button type="submit" disabled={saving} style={{ padding: '8px 20px', background: BRAND.purple, color: BRAND.white, border: 'none', cursor: 'pointer', fontFamily: BRAND.font, fontSize: '13px' }}>{saving ? 'Saving...' : 'Save'}</button>
+          </div>
+        </form>
+      )}
+
+      {/* Opportunities — expandable cards */}
+      {filtered.length === 0 ? (
+        <div style={{ padding: '40px 24px', color: BRAND.coolGrey, fontSize: '14px', background: BRAND.white, border: `1px solid ${BRAND.greyBorder}` }}>
+          No cross-sell opportunities match the current filter.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {filtered.map(cs => {
+            const isExpanded = expandedId === cs.id
+            const proj = projectMap[cs.source_project_id]
+            const daysSinceUpdate = Math.floor((Date.now() - new Date(cs.updated_at).getTime()) / (1000 * 60 * 60 * 24))
+            const isStale = daysSinceUpdate > 14
+
+            return (
+              <div key={cs.id} style={{ background: BRAND.white, border: `1px solid ${BRAND.greyBorder}` }}>
+                {/* Header row */}
+                <div onClick={() => setExpandedId(isExpanded ? null : cs.id)}
+                  style={{ padding: '14px 20px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '14px', color: BRAND.purple, marginBottom: '4px' }}>{cs.title}</div>
+                    <div style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+                      <span><ClientLink id={cs.client_id}>{clientMap[cs.client_id] || '—'}</ClientLink></span>
+                      <span>{cs.target_service} / {cs.target_sector}</span>
+                      {proj && <span>from <ProjectLink id={proj.id}>{proj.code}</ProjectLink></span>}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexShrink: 0 }}>
+                    {cs.estimated_value && <span style={{ fontSize: '14px', color: BRAND.teal }}>{formatCurrency(cs.estimated_value)}</span>}
+                    <StatusBadge status={cs.probability} map={stageProbMap} />
+                    <select value={cs.pursuit_stage} onClick={e => e.stopPropagation()} onChange={e => updateStage(cs.id, e.target.value)} style={{
+                      padding: '3px 8px', border: `1px solid ${BRAND.greyBorder}`, fontFamily: BRAND.font,
+                      fontSize: '12px', color: BRAND.coolGrey, background: BRAND.white, cursor: 'pointer',
+                    }}>
+                      <option value="identified">Identified</option><option value="qualifying">Qualifying</option>
+                      <option value="introduced">Introduced</option><option value="proposal_prep">Proposal Prep</option>
+                      <option value="proposal_submitted">Submitted</option><option value="negotiation">Negotiation</option>
+                      <option value="won">Won</option><option value="lost">Lost</option><option value="parked">Parked</option>
+                    </select>
+                    {isStale && <span style={{ fontSize: '11px', color: BRAND.red }}>Stale ({daysSinceUpdate}d)</span>}
+                    <span style={{ fontSize: '14px', color: BRAND.coolGrey }}>{isExpanded ? '−' : '+'}</span>
+                  </div>
+                </div>
+
+                {/* Expanded detail */}
+                {isExpanded && (
+                  <div style={{ borderTop: `1px solid ${BRAND.greyBorder}`, padding: '20px' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '16px', marginBottom: '20px', fontSize: '13px' }}>
+                      <div>
+                        <span style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'block', marginBottom: '4px' }}>Owner</span>
+                        {cs.assigned_to_name || '—'}
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'block', marginBottom: '4px' }}>Identified</span>
+                        {formatDate(cs.identified_date)}
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'block', marginBottom: '4px' }}>Last Updated</span>
+                        <span style={{ color: isStale ? BRAND.red : BRAND.coolGrey }}>{formatDate(cs.updated_at)}</span>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '12px', color: BRAND.coolGrey, display: 'block', marginBottom: '4px' }}>Won Date</span>
+                        {cs.won_date ? formatDate(cs.won_date) : '—'}
+                      </div>
+                    </div>
+
+                    {cs.description && (
+                      <div style={{ fontSize: '13px', color: BRAND.coolGrey, marginBottom: '16px', padding: '12px 16px', background: BRAND.greyLight }}>
+                        {cs.description}
+                      </div>
+                    )}
+
+                    {/* Notes / Activity log */}
+                    <div style={{ marginBottom: '16px' }}>
+                      <div style={{ fontSize: '13px', color: BRAND.purple, marginBottom: '8px' }}>Notes and Activity</div>
+                      <textarea
+                        defaultValue={cs.notes || ''}
+                        onBlur={e => { if (e.target.value !== (cs.notes || '')) updateNotes(cs.id, e.target.value) }}
+                        placeholder="Log activities, next steps, contacts, strategy notes here. Updates save automatically when you click away."
+                        style={{
+                          width: '100%', minHeight: '100px', padding: '12px', border: `1px solid ${BRAND.greyBorder}`,
+                          fontFamily: BRAND.font, fontSize: '13px', color: BRAND.coolGrey, boxSizing: 'border-box',
+                          resize: 'vertical', background: BRAND.white,
+                        }}
+                      />
+                      <div style={{ fontSize: '11px', color: BRAND.coolGrey, marginTop: '4px' }}>
+                        Track contacts, meetings held, proposals sent, next actions, and competitor intelligence. Saves on blur.
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

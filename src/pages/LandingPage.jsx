@@ -69,13 +69,6 @@ export default function LandingPage({ onEnter }) {
             Procurement & Compliance Sector
           </div>
         </div>
-          <div style={{ fontSize: '28px', color: BRAND.purple, lineHeight: 1.2, marginBottom: '4px' }}>
-            Budget Management
-          </div>
-          <div style={{ fontSize: '15px', color: BRAND.coolGrey }}>
-            Procurement & Compliance Sector
-          </div>
-        </div>
 
         {/* Divider */}
         <div style={{ height: '3px', background: BRAND.purple, width: '48px', margin: '24px 0' }} />

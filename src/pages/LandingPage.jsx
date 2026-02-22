@@ -62,9 +62,13 @@ export default function LandingPage({ onEnter }) {
       }}>
         {/* Branding header */}
         <div style={{ marginBottom: '8px' }}>
-          <div style={{ fontSize: '13px', color: BRAND.coolGrey, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: '8px' }}>
-            BUDGET MANAGEMENT
+          <div style={{ fontSize: '28px', color: BRAND.purple, lineHeight: 1.2, marginBottom: '4px' }}>
+            Budget Management
           </div>
+          <div style={{ fontSize: '15px', color: BRAND.coolGrey }}>
+            Procurement & Compliance Sector
+          </div>
+        </div>
           <div style={{ fontSize: '28px', color: BRAND.purple, lineHeight: 1.2, marginBottom: '4px' }}>
             Budget Management
           </div>

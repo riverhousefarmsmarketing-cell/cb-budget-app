@@ -18,10 +18,24 @@ export default function LandingPage({ onEnter }) {
   const [error, setError] = useState(false)
   const [shake, setShake] = useState(false)
 
-  const handleSubmit = (e) => {
+  const [loading, setLoading] = useState(false)
+
+  const handleSubmit = async (e) => {
     e.preventDefault()
     if (password === DEMO_PASSWORD) {
+      setLoading(true)
       try { sessionStorage.setItem(STORAGE_KEY, 'granted') } catch {}
+      // Auto-sign in as demo user
+      const { supabase } = await import('../lib/supabase')
+      const { error } = await supabase.auth.signInWithPassword({
+        email: 'demo@sectorbudget.app',
+        password: 'PCSDemo2026!'
+      })
+      if (error) {
+        console.error('Demo sign-in failed:', error.message)
+        setLoading(false)
+        return
+      }
       onEnter()
     } else {
       setError(true)
@@ -141,7 +155,7 @@ export default function LandingPage({ onEnter }) {
               onMouseEnter={e => e.currentTarget.style.opacity = '0.9'}
               onMouseLeave={e => e.currentTarget.style.opacity = '1'}
             >
-              Enter
+              {loading ? 'Loading...' : 'Enter'}
             </button>
           </div>
           {error && (

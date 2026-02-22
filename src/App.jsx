@@ -8,6 +8,7 @@ import WorkPage from './pages/WorkPage'
 import HoursRevenuePage from './pages/HoursRevenuePage'
 import CommercialPage from './pages/CommercialPage'
 import ForecastPlannerPage from './pages/ForecastPlannerPage'
+import ActionTrackerPage from './pages/ActionTrackerPage'
 import SettingsPage from './pages/SettingsPage'
 import ProjectProfilePage from './pages/ProjectProfilePage'
 import EmployeeProfilePage from './pages/EmployeeProfilePage'
@@ -20,6 +21,7 @@ const VIEW_MAP = {
   hoursrevenue: HoursRevenuePage,
   commercial: CommercialPage,
   forecast: ForecastPlannerPage,
+  actions: ActionTrackerPage,
   settings: SettingsPage,
 }
 

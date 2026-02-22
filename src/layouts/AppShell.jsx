@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { key: 'hoursrevenue', label: 'Hours & Revenue', icon: Icons.Grid },
   { key: 'commercial', label: 'Commercial', icon: Icons.DollarSign },
   { key: 'forecast', label: 'Forecast Planner', icon: Icons.TrendingUp },
+  { key: 'actions', label: 'Action Tracker', icon: Icons.CheckSquare },
 ]
 
 const SETTINGS_ITEM = { key: 'settings', label: 'Settings', icon: Icons.Settings }

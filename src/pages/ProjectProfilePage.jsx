@@ -253,13 +253,13 @@ export default function ProjectProfilePage({ projectId, onBack }) {
 
   const tabs = [
     { key: 'overview', label: 'Overview' },
-    { key: 'contacts', label: 'Contacts', count: contacts.length },
-    { key: 'meetings', label: 'Meetings', count: meetings.length },
-    { key: 'risks', label: 'Risks', count: openRisks },
-    { key: 'lessons', label: 'Lessons', count: lessons.length },
-    { key: 'savings', label: 'Savings', count: savings.length },
-    { key: 'variations', label: 'Variations', count: variations.length },
-    { key: 'documents', label: 'Documents', count: documents.length },
+    { key: 'contacts', label: 'Key Contacts', count: contacts.length },
+    { key: 'meetings', label: 'Meeting Minutes', count: meetings.length },
+    { key: 'risks', label: 'Risk Register', count: openRisks },
+    { key: 'lessons', label: 'Lessons Learned', count: lessons.length },
+    { key: 'savings', label: 'Savings Log', count: savings.length },
+    { key: 'variations', label: 'Change Orders', count: variations.length },
+    { key: 'documents', label: 'Key Documents', count: documents.length },
   ]
 
   return (
